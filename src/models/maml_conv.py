@@ -85,10 +85,9 @@ class ConvBase(hk.Module):
         return x
 
 
-class MiniImagenetCNN(hk.Module):
+class MiniImagenetCNNBody(hk.Module):
     def __init__(
         self,
-        output_size,
         hidden_size=32,
         layers=4,
         activation="relu",
@@ -98,7 +97,6 @@ class MiniImagenetCNN(hk.Module):
     ):
         super().__init__(name=name)
         self.layers = layers
-        self.output_size = output_size
         self.hidden_size = hidden_size
         self.activation = activation
         self.normalize = normalize
@@ -110,6 +108,18 @@ class MiniImagenetCNN(hk.Module):
             layers=self.layers,
             max_pool_factor=4 // self.layers,
         )(x, is_training)
+        return (x,)
+
+
+class MiniImagenetCNNHead(hk.Module):
+    def __init__(
+        self, output_size, hidden_size=32, name=None,
+    ):
+        super().__init__(name=name)
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+
+    def __call__(self, x, is_training):
         x = hk.Reshape((25 * self.hidden_size,))(x)
         x = hk.Linear(
             self.output_size,
@@ -117,26 +127,40 @@ class MiniImagenetCNN(hk.Module):
             w_init=hk.initializers.VarianceScaling(1.0, "fan_avg", "uniform"),
             b_init=hk.initializers.Constant(0.0),
         )(x)
-        # x = jax.nn.log_softmax(x)
         return x
 
 
 def MiniImagenetCNNMaker(output_size, loss_fn):
-    MiniImagenetCNN_t = hk.transform_with_state(
-        lambda x, is_training: MiniImagenetCNN(output_size=output_size)(
+    MiniImagenetCNNBody_t = hk.transform_with_state(
+        lambda x, is_training: MiniImagenetCNNBody()(x, is_training,)
+    )
+    MiniImagenetCNNHead_t = hk.transform_with_state(
+        lambda x, is_training: MiniImagenetCNNHead(output_size=output_size)(
             x, is_training,
         )
     )
 
-    def apply_and_loss_fn(
-        rng, slow_params, fast_params, state, is_training, inputs, targets
+    def slow_apply(rng, slow_params, slow_state, is_training, inputs):
+        return MiniImagenetCNNBody_t.apply(
+            slow_params, slow_state, rng, inputs, is_training,
+        )
+
+    def fast_apply_and_loss_fn(
+        rng, fast_params, fast_state, is_training, inputs, targets
     ):
-        params = hk.data_structures.merge(slow_params, fast_params)
-        logits, state = MiniImagenetCNN_t.apply(params, state, rng, inputs, is_training)
+        # params = hk.data_structures.merge(slow_params, fast_params)
+        logits, state = MiniImagenetCNNHead_t.apply(
+            fast_params, fast_state, rng, inputs, is_training
+        )
         loss, *aux = loss_fn(logits, targets)
         return loss, (state, *aux)
 
         return logits, state
 
-    return MiniImagenetCNN_t, apply_and_loss_fn
+    return (
+        MiniImagenetCNNBody_t,
+        MiniImagenetCNNHead_t,
+        slow_apply,
+        fast_apply_and_loss_fn,
+    )
 

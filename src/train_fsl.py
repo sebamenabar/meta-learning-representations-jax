@@ -110,50 +110,71 @@ if __name__ == "__main__":
         loss, acc = mean_xe_and_acc(logits, targets)
         return loss, {"acc": acc}
 
-    MiniImagenetCNN, apply_and_loss_fn = MiniImagenetCNNMaker(args.way, loss_fn)
+    (
+        MiniImagenetCNNBody,
+        MiniImagenetCNNHead,
+        slow_apply,
+        fast_apply_and_loss_fn,
+    ) = MiniImagenetCNNMaker(args.way, loss_fn)
 
     inner_opt = optix.chain(optix.sgd(args.inner_lr))
     inner_loop, outer_loop = make_fsl_inner_outer_loop(
-        apply_and_loss_fn, inner_opt.update, args.num_inner_steps, update_state=False
+        slow_apply,
+        fast_apply_and_loss_fn,
+        inner_opt.update,
+        args.num_inner_steps,
+        update_state=False,
     )
     batched_outer_loop = make_batched_outer_loop(outer_loop)
 
     ### PREPARE PARAMETERS
-    params, state = MiniImagenetCNN.init(rng, jnp.zeros((2, 84, 84, 3)), False)
-    params = jax.tree_map(lambda x: jax.device_put(x, device), params)
-    state = jax.tree_map(lambda x: jax.device_put(x, device), state)
-    predicate = lambda m, n, v: m == "mini_imagenet_cnn/linear"
+    slow_params, slow_state = MiniImagenetCNNBody.init(
+        rng, jnp.zeros((2, 84, 84, 3)), False
+    )
+    slow_outputs, _ = slow_apply(
+        rng, slow_params, slow_state, False, jnp.zeros((2, 84, 84, 3))
+    )
+    fast_params, fast_state = MiniImagenetCNNHead.init(rng, *slow_outputs, False)
+    move_to_device = lambda x: jax.device_put(x, device)
+    slow_params = jax.tree_map(move_to_device, slow_params)
+    fast_params = jax.tree_map(move_to_device, fast_params)
+    slow_state = jax.tree_map(move_to_device, slow_state)
+    fast_state = jax.tree_map(move_to_device, fast_state)
+    # predicate = lambda m, n, v: m == "mini_imagenet_cnn/linear"
 
     outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
         step_size=args.outer_lr,
     )
-    outer_opt_state = outer_opt_init(params)
+    outer_opt_state = outer_opt_init((slow_params, fast_params))
 
     ### TRAIN FUNCTIONS
-    def step(step_num, outer_opt_state, state, x_spt, y_spt, x_qry, y_qry):
-        params = outer_get_params(outer_opt_state)
-        fast_params, slow_params = hk.data_structures.partition(predicate, params)
+    def step(
+        step_num, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
+    ):
+        slow_params, fast_params = outer_get_params(outer_opt_state)
+        # fast_params, slow_params = hk.data_structures.partition(predicate, params)
         inner_opt_state = inner_opt.init(fast_params)
 
-        (outer_loss, (state, info)), grads = value_and_grad(
+        (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
             batched_outer_loop, (1, 2), has_aux=True
         )(
-            None,
+            None,  # rng
             slow_params,
             fast_params,
-            state,
+            slow_state,
+            fast_state,
+            True,  # is_training
             inner_opt_state,
-            True,
             x_spt,
             y_spt,
             x_qry,
             y_qry,
         )
 
-        grads = hk.data_structures.merge(*grads)
+        # grads = hk.data_structures.merge(*grads)
         outer_opt_state = outer_opt_update(i, grads, outer_opt_state)
 
-        return outer_opt_state, state, info
+        return outer_opt_state, slow_state, fast_state, info
 
     if jit_enabled:
         step = jit(step)
@@ -178,8 +199,8 @@ if __name__ == "__main__":
             args.disjoint_tasks,
         )
 
-        outer_opt_state, state, info = step(
-            i, outer_opt_state, state, x_spt, y_spt, x_qry, y_qry
+        outer_opt_state, slow_state, fast_state, info = step(
+            i, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
         )
 
         # print("train info")
@@ -202,18 +223,19 @@ if __name__ == "__main__":
                     False,
                 )
 
-                params = outer_get_params(outer_opt_state)
-                fast_params, slow_params = hk.data_structures.partition(
-                    predicate, params
-                )
+                slow_params, fast_params = outer_get_params(outer_opt_state)
+                # fast_params, slow_params = hk.data_structures.partition(
+                #     predicate, params
+                # )
                 inner_opt_state = inner_opt.init(fast_params)
-                val_outer_loss, (val_state, val_info) = batched_outer_loop(
+                val_outer_loss, (_, _, val_info) = batched_outer_loop(
                     None,
                     slow_params,
                     fast_params,
-                    state,
-                    inner_opt_state,
+                    slow_state,
+                    fast_state,
                     False,
+                    inner_opt_state,
                     x_spt,
                     y_spt,
                     x_qry,
