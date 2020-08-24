@@ -85,7 +85,7 @@ class ConvBase(hk.Module):
         return x
 
 
-class MiniImagenetCNNMaker(hk.Module):
+class MiniImagenetCNN(hk.Module):
     def __init__(
         self,
         output_size,
@@ -93,7 +93,8 @@ class MiniImagenetCNNMaker(hk.Module):
         layers=4,
         activation="relu",
         normalize=True,
-        name="mini_imagenet_cnn",
+        # name="mini_imagenet_cnn",
+        name=None,
     ):
         super().__init__(name=name)
         self.layers = layers
@@ -118,3 +119,24 @@ class MiniImagenetCNNMaker(hk.Module):
         )(x)
         # x = jax.nn.log_softmax(x)
         return x
+
+
+def MiniImagenetCNNMaker(output_size, loss_fn):
+    MiniImagenetCNN_t = hk.transform_with_state(
+        lambda x, is_training: MiniImagenetCNN(output_size=output_size)(
+            x, is_training,
+        )
+    )
+
+    def apply_and_loss_fn(
+        rng, slow_params, fast_params, state, is_training, inputs, targets
+    ):
+        params = hk.data_structures.merge(slow_params, fast_params)
+        logits, state = MiniImagenetCNN_t.apply(params, state, rng, inputs, is_training)
+        loss, *aux = loss_fn(logits, targets)
+        return loss, (state, *aux)
+
+        return logits, state
+
+    return MiniImagenetCNN_t, apply_and_loss_fn
+
