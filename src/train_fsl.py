@@ -1,6 +1,11 @@
-from tqdm import tqdm
-import functools
+import os
+import sys
+
 import pickle
+import functools
+from tqdm import tqdm
+from argparse import ArgumentParser
+
 import numpy as onp
 
 import jax
@@ -22,73 +27,105 @@ from lib import (
     make_batched_outer_loop,
 )
 from models.maml_conv import MiniImagenetCNNMaker
-from data import prepare_miniimagenet_data, fsl_sample_tasks
+from data import prepare_data, statistics
 from data.sampling import fsl_sample_transfer_and_build
 
 
+def parse_args():
+    parser = ArgumentParser()
+
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
+    parser.add_argument("--val_every_k_steps", type=int, default=500)
+    parser.add_argument("--disable-jit", action="store_true", default=False)
+
+    # Training config settings
+    parser.add_argument("--way", type=int, required=True)
+    parser.add_argument("--shot", type=int, required=True)
+    parser.add_argument("--qry-shot", type=int, required=True)
+
+    # Training hyperparameters
+    parser.add_argument("--batch_size", type=int, required=True)
+    parser.add_argument("--val_batch_size", type=int, default=25)
+    parser.add_argument("--inner_lr", type=float, default=5e-1)
+    parser.add_argument("--outer_lr", type=float, default=1e-2)
+    parser.add_argument("--num_outer_steps", type=int)
+    parser.add_argument("--num_inner_steps", type=int, required=True)
+    parser.add_argument(
+        "--disjoint_tasks",
+        action="store_true",
+        help="Classes between tasks do not repeat",
+        default=False,
+    )
+
+    # Data settings
+    parser.add_argument(
+        "--data_dir", type=str, default="/workspace1/samenabar/data/mini-imagenet/"
+    )
+    parser.add_argument("--dataset", type=str, choices=["miniimagenet"], required=True)
+
+    # Device settings
+    parser.add_argument("--gpus", type=int, default=0)
+    parser.add_argument("--prefetch_data_gpu", action="store_true", default=False)
+
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    cpu, gpu = setup_device()
-    rng = random.PRNGKey(0)
-    miniimagenet_data_dir = "/workspace1/samenabar/data/mini-imagenet/"
-    num_tasks = 25
-    way = 5
-    spt_shot = 1
-    qry_shot = 15
-    inner_lr = 5e-1
-    outer_lr = 1e-2
-    num_inner_steps = 5
-    num_outer_steps = 10000
-    disjoint_tasks = False
+
+    args = parse_args()
+    print(args)
+    jit_enabled = not args.disable_jit
+
+    cpu, device = setup_device(args.gpus)  # gpu is None if args.gpus == 0
+    rng = random.PRNGKey(args.seed)
+    # miniimagenet_data_dir = "/workspace1/samenabar/data/mini-imagenet/"
+    # num_tasks = 25
+    # way = 5
+    # spt_shot = 1
+    # qry_shot = 15
+    # inner_lr = 5e-1
+    # outer_lr = 1e-2
+    # num_inner_steps = 5
+    # num_outer_steps = 50000
+    # disjoint_tasks = False
 
     ### DATA
-    train_images, train_labels, _ = prepare_miniimagenet_data(
-        miniimagenet_data_dir, "train"
-    )
-    val_images, val_labels, _ = prepare_miniimagenet_data(miniimagenet_data_dir, "val")
-    train_images = jax.device_put(train_images, cpu)
-    train_labels = jax.device_put(train_labels, cpu)
-    val_images = jax.device_put(val_images, cpu)
-    val_labels = jax.device_put(val_labels, cpu)
 
-    mean = jax.device_put(jnp.array([0.4707837, 0.4494574, 0.4026407]), gpu)
-    std = jax.device_put(jnp.array([0.28429058, 0.27527657, 0.29029518]), gpu)
+    train_images, train_labels, val_images, val_labels, mean, std = prepare_data(
+        args.dataset, args.data_dir, cpu, device, args.prefetch_data_gpu,
+    )
 
     print("Train data:", train_images.shape, train_labels.shape)
     print("Val data:", val_images.shape, val_labels.shape)
+    val_way = args.way
+    if args.way > val_images.shape[0]:
+        print(
+            f"Training with {args.way}-way but validation only has {val_images.shape[0]}-classes"
+        )
+        val_way = val_images.shape[0]
 
     ### MODEL
-    MiniImagenetCNN = hk.transform_with_state(
-        lambda x, is_training: MiniImagenetCNNMaker(output_size=way,)(x, is_training),
-    )
-    inner_opt = optix.chain(optix.sgd(inner_lr))
+    def loss_fn(logits, targets):
+        loss, acc = mean_xe_and_acc(logits, targets)
+        return loss, {"acc": acc}
 
-    ### FUNCTIONS
-    loss_fn = mean_xe_and_acc
+    MiniImagenetCNN, apply_and_loss_fn = MiniImagenetCNNMaker(args.way, loss_fn)
 
-    def apply_and_loss_fn(
-        rng, slow_params, fast_params, state, is_training, inputs, targets
-    ):
-        params = hk.data_structures.merge(slow_params, fast_params)
-        logits, state = MiniImagenetCNN.apply(params, state, rng, inputs, is_training)
-        loss, acc = loss_fn(logits, targets)
-        return loss, (state, {"acc": acc})
-
-        return logits, state
-
+    inner_opt = optix.chain(optix.sgd(args.inner_lr))
     inner_loop, outer_loop = make_fsl_inner_outer_loop(
-        apply_and_loss_fn, inner_opt.update, num_inner_steps, update_state=False
+        apply_and_loss_fn, inner_opt.update, args.num_inner_steps, update_state=False
     )
-
     batched_outer_loop = make_batched_outer_loop(outer_loop)
 
     ### PREPARE PARAMETERS
     params, state = MiniImagenetCNN.init(rng, jnp.zeros((2, 84, 84, 3)), False)
-    params = jax.tree_map(lambda x: jax.device_put(x, gpu), params)
-    state = jax.tree_map(lambda x: jax.device_put(x, gpu), state)
+    params = jax.tree_map(lambda x: jax.device_put(x, device), params)
+    state = jax.tree_map(lambda x: jax.device_put(x, device), state)
     predicate = lambda m, n, v: m == "mini_imagenet_cnn/linear"
 
     outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
-        step_size=outer_lr,
+        step_size=args.outer_lr,
     )
     outer_opt_state = outer_opt_init(params)
 
@@ -118,8 +155,13 @@ if __name__ == "__main__":
 
         return outer_opt_state, state, info
 
-    step = jit(step)
-    pbar = tqdm(range(num_outer_steps))
+    if jit_enabled:
+        step = jit(step)
+    pbar = tqdm(range(args.num_outer_steps))
+    val_outer_loss = 0
+    vfol = 0
+    vioa = 0
+    vfoa = 0
     for i in pbar:
         rng, rng_sample = split(rng)
         x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
@@ -128,55 +170,23 @@ if __name__ == "__main__":
             std,
             train_images,
             train_labels,
-            num_tasks,
-            way,
-            spt_shot,
-            qry_shot,
-            gpu,
-            disjoint_tasks,
+            args.batch_size,
+            args.way,
+            args.shot,
+            args.qry_shot,
+            device,
+            args.disjoint_tasks,
         )
-        # sampled_images, sampled_labels = fsl_sample_tasks(
-        #     rng_sample,
-        #     train_images,
-        #     train_labels,
-        #     num_tasks=num_tasks,
-        #     way=way,
-        #     shot=spt_shot + qry_shot,
-        #     disjoint=disjoint_tasks,
-        # )
-        # shuffled_labels = (
-        #     jnp.repeat(jnp.arange(way), spt_shot + qry_shot)
-        #     .reshape(way, spt_shot + qry_shot)[None, :]
-        #     .repeat(num_tasks, 0)
-        # )
-
-        # # Transfer ints but operate on gpu
-        # sampled_images = jax.device_put(sampled_images, gpu)
-        # shuffled_labels = jax.device_put(shuffled_labels, gpu)
-
-        # images_shape = sampled_images.shape[3:]
-        # sampled_images = ((sampled_images / 255) - mean) / std
-
-        # # Transfer floats but operate on cpu
-        # # sampled_images = jax.device_put(sampled_images, gpu)
-        # # shuffled_labels = jax.device_put(shuffled_labels, gpu)
-
-        # x_spt, x_qry = jnp.split(sampled_images, (spt_shot,), 2)
-        # x_spt = x_spt.reshape(num_tasks, way * spt_shot, *images_shape)
-        # x_qry = x_qry.reshape(num_tasks, way * qry_shot, *images_shape)
-        # y_spt, y_qry = jnp.split(shuffled_labels, (spt_shot,), 2)
-        # y_spt = y_spt.reshape(num_tasks, way * spt_shot)
-        # y_qry = y_qry.reshape(num_tasks, way * qry_shot)
-        # y_spt = y_qry = shuffled_labels.reshape(num_tasks, way * shot)
 
         outer_opt_state, state, info = step(
             i, outer_opt_state, state, x_spt, y_spt, x_qry, y_qry
         )
 
+        # print("train info")
         # print(info)
 
-        if (i % 50) == 0:
-            if (i % 200) == 0:
+        if (((i + 1) % args.progress_bar_refresh_rate) == 0) or (i == 0):
+            if (((i + 1) % args.val_every_k_steps) == 0) or (i == 0):
                 rng, rng_sample = split(rng)
                 x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
                     rng_sample,
@@ -184,16 +194,18 @@ if __name__ == "__main__":
                     std,
                     val_images,
                     val_labels,
-                    num_tasks,
-                    way,
-                    spt_shot,
-                    qry_shot,
-                    gpu,
+                    args.val_batch_size,
+                    val_way,
+                    args.shot,
+                    args.qry_shot,
+                    device,
                     False,
                 )
 
                 params = outer_get_params(outer_opt_state)
-                fast_params, slow_params = hk.data_structures.partition(predicate, params)
+                fast_params, slow_params = hk.data_structures.partition(
+                    predicate, params
+                )
                 inner_opt_state = inner_opt.init(fast_params)
                 val_outer_loss, (val_state, val_info) = batched_outer_loop(
                     None,
@@ -207,6 +219,10 @@ if __name__ == "__main__":
                     x_qry,
                     y_qry,
                 )
+                # print("val_info")
+                # print(val_info)
+                vioa = val_info["outer"]["initial_aux"][0]["acc"].mean()
+                vfoa = val_info["outer"]["final_aux"][0]["acc"].mean()
 
             pbar.set_postfix(
                 # iol=f"{info['outer']['initial_loss'].mean():.3f}",
@@ -217,10 +233,7 @@ if __name__ == "__main__":
                 # fia=f"{info['inner']['final_aux'][0]['acc'].mean():.3f}",
                 # ioa=f"{info['outer']['initial_aux'][0]['acc'].mean():.3f}",
                 foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
-
                 vfol=f"{val_outer_loss:.3f}",
-                vioa=f"{val_info['outer']['initial_aux'][0]['acc'].mean():.3f}",
-                vfoa=f"{val_info['outer']['final_aux'][0]['acc'].mean():.3f}",
-
-
+                vioa=f"{vioa:.3f}",
+                vfoa=f"{vfoa:.3f}",
             )
