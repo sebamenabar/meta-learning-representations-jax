@@ -3,6 +3,10 @@ import os.path as osp
 import numpy as onp
 
 
+mean = onp.array([0.4707837, 0.4494574, 0.4026407])
+std = onp.array([0.28429058, 0.27527657, 0.29029518])
+
+
 def prepare_data(data_dir, split="train"):
     fname = f"mini-imagenet-cache-{split}.pkl"
     with open(osp.join(data_dir, fname), "rb") as f:
