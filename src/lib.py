@@ -5,13 +5,13 @@ from jax import jit, numpy as jnp, value_and_grad, vmap
 from jax.experimental import optix
 
 
-def setup_device(gpus=0):
+def setup_device(gpus=0, default_platform="cpu"):
     if gpus != 0:
         gpu = jax.devices("gpu")[0]
     else:
         gpu = None
+        default_platform = "cpu"
     cpu = jax.devices("cpu")[0]
-    default_platform = "cpu"
     jax.config.update("jax_platform_name", default_platform)
 
     return cpu, gpu

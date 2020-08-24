@@ -1,5 +1,6 @@
 import jax
 import haiku as hk
+from .activations import activations
 
 
 class ConvBlock(hk.Module):
@@ -20,17 +21,18 @@ class ConvBlock(hk.Module):
         self.max_pool_factor = max_pool_factor
         self.normalize = normalize
         self.stride = stride = (int(2 * max_pool_factor), int(2 * max_pool_factor), 1)
-        if activation == "relu":
-            self.activation = jax.nn.relu
-        elif activation == "swish":
-            self.activation = jax.nn.swish
+        # if activation == "relu":
+        #     self.activation = jax.nn.relu
+        # elif activation == "swish":
+        #     self.activation = jax.nn.swish
+        self.activation = activations[activation]
         if max_pool:
             self.conv_stride = (1, 1)
         else:
-            self.conv_stride = self.stride
+            self.conv_stride = self.stride[:2]
+        # self.conv_stride = (1, 1)
 
     def __call__(self, x, is_training):
-
         x = hk.Conv2D(
             output_channels=self.output_channels,
             kernel_shape=self.kernel_size,
@@ -94,17 +96,19 @@ class MiniImagenetCNNBody(hk.Module):
         normalize=True,
         # name="mini_imagenet_cnn",
         name=None,
+        max_pool=True,
     ):
         super().__init__(name=name)
         self.layers = layers
         self.hidden_size = hidden_size
         self.activation = activation
         self.normalize = normalize
+        self.max_pool = max_pool
 
     def __call__(self, x, is_training):
         x = ConvBase(
             output_channels=self.hidden_size,
-            max_pool=True,
+            max_pool=self.max_pool,
             layers=self.layers,
             max_pool_factor=4 // self.layers,
         )(x, is_training)
@@ -113,14 +117,15 @@ class MiniImagenetCNNBody(hk.Module):
 
 class MiniImagenetCNNHead(hk.Module):
     def __init__(
-        self, output_size, hidden_size=32, name=None,
+        self, output_size, spatial_dims=25, hidden_size=32, name=None,
     ):
         super().__init__(name=name)
         self.output_size = output_size
         self.hidden_size = hidden_size
+        self.spatial_dims = spatial_dims
 
     def __call__(self, x, is_training):
-        x = hk.Reshape((25 * self.hidden_size,))(x)
+        x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
         x = hk.Linear(
             self.output_size,
             with_bias=True,
@@ -130,12 +135,20 @@ class MiniImagenetCNNHead(hk.Module):
         return x
 
 
-def MiniImagenetCNNMaker(output_size, loss_fn):
+def MiniImagenetCNNMaker(
+    loss_fn, output_size, hidden_size, spatial_dims, max_pool, activation="relu"
+):
     MiniImagenetCNNBody_t = hk.transform_with_state(
-        lambda x, is_training: MiniImagenetCNNBody()(x, is_training,)
+        lambda x, is_training: MiniImagenetCNNBody(
+            hidden_size=hidden_size, max_pool=max_pool, activation=activation,
+        )(
+            x, is_training,
+        )
     )
     MiniImagenetCNNHead_t = hk.transform_with_state(
-        lambda x, is_training: MiniImagenetCNNHead(output_size=output_size)(
+        lambda x, is_training: MiniImagenetCNNHead(
+            output_size=output_size, hidden_size=hidden_size, spatial_dims=spatial_dims
+        )(
             x, is_training,
         )
     )

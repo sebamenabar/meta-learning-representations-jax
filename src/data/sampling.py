@@ -14,7 +14,7 @@ def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
     if not disjoint:
         # For each task take way classes
         sampled_classes = shuffle_along_axis(
-            rng_classes, onp.arange(images.shape[0])[None, :].repeat(num_tasks, 0), 1
+            rng_classes, jnp.arange(images.shape[0])[None, :].repeat(num_tasks, 0), 1
         )[:, :way]
         # Flatten everything for indexing
         sampled_classes = sampled_classes.reshape(num_tasks * way, 1)
@@ -24,7 +24,7 @@ def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
         # Sample from all the classes without repetition between tasks
         sampled_classes = random.choice(
             rng_classes,
-            onp.arange(images.shape[0]),
+            jnp.arange(images.shape[0]),
             (num_tasks * way, 1),
             replace=False,
         )
@@ -33,7 +33,7 @@ def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
 
     # For each task for each class sample shot indexes
     sampled_idxs = shuffle_along_axis(
-        rng_idxs, onp.arange(images.shape[1])[None].repeat(num_tasks * way, 0), 1
+        rng_idxs, jnp.arange(images.shape[1])[None].repeat(num_tasks * way, 0), 1
     )[:, :shot]
 
     sampled_images = images[sampled_classes, sampled_idxs]
@@ -47,7 +47,16 @@ def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
 
 
 def fsl_sample_transfer_and_build(
-    rng, mean, std, images, labels, num_tasks, way, spt_shot, qry_shot, device=None, disjoint=True,
+    rng,
+    preprocess_fn,
+    images,
+    labels,
+    num_tasks,
+    way,
+    spt_shot,
+    qry_shot,
+    device=None,
+    disjoint=True,
 ):
     sampled_images, sampled_labels = fsl_sample_tasks(
         rng,
@@ -69,7 +78,8 @@ def fsl_sample_transfer_and_build(
     shuffled_labels = jax.device_put(shuffled_labels, device)
 
     images_shape = sampled_images.shape[3:]
-    sampled_images = ((sampled_images / 255) - mean) / std
+    # sampled_images = ((sampled_images / 255) - mean) / std
+    sampled_images = preprocess_fn(sampled_images)
 
     # Transfer floats but operate on cpu
     # sampled_images = jax.device_put(sampled_images, gpu)

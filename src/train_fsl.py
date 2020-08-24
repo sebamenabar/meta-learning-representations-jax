@@ -26,9 +26,10 @@ from lib import (
     make_fsl_inner_outer_loop,
     make_batched_outer_loop,
 )
-from models.maml_conv import MiniImagenetCNNMaker
-from data import prepare_data, statistics
+from data import prepare_data, statistics, preprocess_data
 from data.sampling import fsl_sample_transfer_and_build
+from models.activations import activations
+from models.maml_conv import MiniImagenetCNNMaker
 
 
 def parse_args():
@@ -38,6 +39,12 @@ def parse_args():
     parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
     parser.add_argument("--val_every_k_steps", type=int, default=500)
     parser.add_argument("--disable-jit", action="store_true", default=False)
+
+    # Model settings
+    parser.add_argument("--hidden_size", type=int, default=32)
+    parser.add_argument(
+        "--activation", type=str, default="relu", choices=list(activations.keys())
+    )
 
     # Training config settings
     parser.add_argument("--way", type=int, required=True)
@@ -62,7 +69,9 @@ def parse_args():
     parser.add_argument(
         "--data_dir", type=str, default="/workspace1/samenabar/data/mini-imagenet/"
     )
-    parser.add_argument("--dataset", type=str, choices=["miniimagenet"], required=True)
+    parser.add_argument(
+        "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
+    )
 
     # Device settings
     parser.add_argument("--gpus", type=int, default=0)
@@ -71,28 +80,34 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def loss_fn(logits, targets):
+    loss, acc = mean_xe_and_acc(logits, targets)
+    return loss, {"acc": acc}
 
+
+if __name__ == "__main__":
     args = parse_args()
     print(args)
     jit_enabled = not args.disable_jit
 
-    cpu, device = setup_device(args.gpus)  # gpu is None if args.gpus == 0
+    if args.dataset == "omniglot" and args.prefetch_data_gpu:
+        default_platform = "gpu"
+    else:
+        default_platform = "cpu"
+    cpu, device = setup_device(
+        args.gpus, default_platform
+    )  # gpu is None if args.gpus == 0
     rng = random.PRNGKey(args.seed)
     # miniimagenet_data_dir = "/workspace1/samenabar/data/mini-imagenet/"
-    # num_tasks = 25
-    # way = 5
-    # spt_shot = 1
-    # qry_shot = 15
-    # inner_lr = 5e-1
-    # outer_lr = 1e-2
-    # num_inner_steps = 5
-    # num_outer_steps = 50000
-    # disjoint_tasks = False
 
     ### DATA
+    ### TEMP
+    if args.dataset == "miniimagenet":
+        args.data_dir = "/workspace1/samenabar/data/mini-imagenet/"
+    elif args.dataset == "omniglot":
+        args.data_dir = "/workspace1/samenabar/data/omniglot/"
 
-    train_images, train_labels, val_images, val_labels, mean, std = prepare_data(
+    train_images, train_labels, val_images, val_labels, preprocess_fn = prepare_data(
         args.dataset, args.data_dir, cpu, device, args.prefetch_data_gpu,
     )
 
@@ -105,17 +120,26 @@ if __name__ == "__main__":
         )
         val_way = val_images.shape[0]
 
-    ### MODEL
-    def loss_fn(logits, targets):
-        loss, acc = mean_xe_and_acc(logits, targets)
-        return loss, {"acc": acc}
+    if args.dataset == "miniimagenet":
+        max_pool = True
+        spatial_dims = 25
+    elif args.dataset == "omniglot":
+        max_pool = False
+        spatial_dims = 4
 
     (
         MiniImagenetCNNBody,
         MiniImagenetCNNHead,
         slow_apply,
         fast_apply_and_loss_fn,
-    ) = MiniImagenetCNNMaker(args.way, loss_fn)
+    ) = MiniImagenetCNNMaker(
+        loss_fn,
+        output_size=args.way,
+        hidden_size=args.hidden_size,
+        spatial_dims=spatial_dims,
+        max_pool=max_pool,
+        activation=args.activation,
+    )
 
     inner_opt = optix.chain(optix.sgd(args.inner_lr))
     inner_loop, outer_loop = make_fsl_inner_outer_loop(
@@ -128,12 +152,13 @@ if __name__ == "__main__":
     batched_outer_loop = make_batched_outer_loop(outer_loop)
 
     ### PREPARE PARAMETERS
-    slow_params, slow_state = MiniImagenetCNNBody.init(
-        rng, jnp.zeros((2, 84, 84, 3)), False
-    )
-    slow_outputs, _ = slow_apply(
-        rng, slow_params, slow_state, False, jnp.zeros((2, 84, 84, 3))
-    )
+    if args.dataset == "miniimagenet":
+        setup_tensor = jnp.zeros((2, 84, 84, 3))
+    elif args.dataset == "omniglot":
+        setup_tensor = jnp.zeros((2, 28, 28, 1))
+
+    slow_params, slow_state = MiniImagenetCNNBody.init(rng, setup_tensor, False)
+    slow_outputs, _ = slow_apply(rng, slow_params, slow_state, False, setup_tensor,)
     fast_params, fast_state = MiniImagenetCNNHead.init(rng, *slow_outputs, False)
     move_to_device = lambda x: jax.device_put(x, device)
     slow_params = jax.tree_map(move_to_device, slow_params)
@@ -187,8 +212,7 @@ if __name__ == "__main__":
         rng, rng_sample = split(rng)
         x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
             rng_sample,
-            mean,
-            std,
+            preprocess_fn,
             train_images,
             train_labels,
             args.batch_size,
@@ -211,8 +235,7 @@ if __name__ == "__main__":
                 rng, rng_sample = split(rng)
                 x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
                     rng_sample,
-                    mean,
-                    std,
+                    preprocess_fn,
                     val_images,
                     val_labels,
                     args.val_batch_size,
