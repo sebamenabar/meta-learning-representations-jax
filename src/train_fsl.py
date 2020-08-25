@@ -10,11 +10,20 @@ import numpy as onp
 
 import jax
 from jax.random import split
-from jax.image import resize as im_resize
 from jax.tree_util import Partial as partial
-from jax import ops, nn, jit, grad, value_and_grad, lax, vmap, random, numpy as jnp
+from jax import (
+    ops,
+    # nn,
+    jit,
+    grad,
+    value_and_grad,
+    # lax,
+    vmap,
+    random,
+    numpy as jnp,
+)
 
-from jax.experimental import stax
+# from jax.experimental import stax
 from jax.experimental import optix
 from jax.experimental import optimizers
 
@@ -54,6 +63,7 @@ def parse_args():
     # Training hyperparameters
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--val_batch_size", type=int, default=25)
+    parser.add_argument("--val_num_tasks", type=int, default=1000)
     parser.add_argument("--inner_lr", type=float, default=5e-1)
     parser.add_argument("--outer_lr", type=float, default=1e-2)
     parser.add_argument("--num_outer_steps", type=int)
@@ -83,6 +93,56 @@ def parse_args():
 def loss_fn(logits, targets):
     loss, acc = mean_xe_and_acc(logits, targets)
     return loss, {"acc": acc}
+
+
+def mm_fn(x, *xs):
+    return jnp.stack(jnp.array(xs)).reshape(-1)
+
+
+def validate(rng, loss_acc_fn, sample_fn, val_num_tasks, val_batch_size):
+    results = []
+    for i in range(val_num_tasks // val_batch_size):
+        rng, rng_sample = split(rng)
+        x_spt, y_spt, x_qry, y_qry = sample_fn(rng)
+        results.append(loss_acc_fn(x_spt, y_spt, x_qry, y_qry))
+
+    results = jax.tree_util.tree_multimap(mm_fn, results[0], *results)
+    return results
+
+
+def prepare_model(dataset, way, hidden_size, activation):
+    if dataset == "miniimagenet":
+        max_pool = True
+        spatial_dims = 25
+    elif dataset == "omniglot":
+        max_pool = False
+        spatial_dims = 4
+
+    return MiniImagenetCNNMaker(
+        loss_fn,
+        output_size=way,
+        hidden_size=hidden_size,
+        spatial_dims=spatial_dims,
+        max_pool=max_pool,
+        activation=activation,
+    )
+
+
+def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
+    if dataset == "miniimagenet":
+        setup_tensor = jnp.zeros((2, 84, 84, 3))
+    elif dataset == "omniglot":
+        setup_tensor = jnp.zeros((2, 28, 28, 1))
+    slow_params, slow_state = slow_init(rng, setup_tensor, False)
+    slow_outputs, _ = slow_apply(rng, slow_params, slow_state, False, setup_tensor,)
+    fast_params, fast_state = fast_init(rng, *slow_outputs, False)
+    move_to_device = lambda x: jax.device_put(x, device)
+    slow_params = jax.tree_map(move_to_device, slow_params)
+    fast_params = jax.tree_map(move_to_device, fast_params)
+    slow_state = jax.tree_map(move_to_device, slow_state)
+    fast_state = jax.tree_map(move_to_device, fast_state)
+
+    return slow_params, fast_params, slow_state, fast_state
 
 
 if __name__ == "__main__":
@@ -116,29 +176,23 @@ if __name__ == "__main__":
     val_way = args.way
     if args.way > val_images.shape[0]:
         print(
-            f"Training with {args.way}-way but validation only has {val_images.shape[0]}-classes"
+            f"Training with {args.way}-way but validation only has {val_images.shape[0]} classes"
         )
         val_way = val_images.shape[0]
-
-    if args.dataset == "miniimagenet":
-        max_pool = True
-        spatial_dims = 25
-    elif args.dataset == "omniglot":
-        max_pool = False
-        spatial_dims = 4
 
     (
         MiniImagenetCNNBody,
         MiniImagenetCNNHead,
         slow_apply,
         fast_apply_and_loss_fn,
-    ) = MiniImagenetCNNMaker(
-        loss_fn,
-        output_size=args.way,
-        hidden_size=args.hidden_size,
-        spatial_dims=spatial_dims,
-        max_pool=max_pool,
-        activation=args.activation,
+    ) = prepare_model(args.dataset, args.way, args.hidden_size, args.activation)
+    slow_params, fast_params, slow_state, fast_state = make_params(
+        rng,
+        args.dataset,
+        MiniImagenetCNNBody.init,
+        slow_apply,
+        MiniImagenetCNNHead.init,
+        device,
     )
 
     inner_opt = optix.chain(optix.sgd(args.inner_lr))
@@ -150,22 +204,6 @@ if __name__ == "__main__":
         update_state=False,
     )
     batched_outer_loop = make_batched_outer_loop(outer_loop)
-
-    ### PREPARE PARAMETERS
-    if args.dataset == "miniimagenet":
-        setup_tensor = jnp.zeros((2, 84, 84, 3))
-    elif args.dataset == "omniglot":
-        setup_tensor = jnp.zeros((2, 28, 28, 1))
-
-    slow_params, slow_state = MiniImagenetCNNBody.init(rng, setup_tensor, False)
-    slow_outputs, _ = slow_apply(rng, slow_params, slow_state, False, setup_tensor,)
-    fast_params, fast_state = MiniImagenetCNNHead.init(rng, *slow_outputs, False)
-    move_to_device = lambda x: jax.device_put(x, device)
-    slow_params = jax.tree_map(move_to_device, slow_params)
-    fast_params = jax.tree_map(move_to_device, fast_params)
-    slow_state = jax.tree_map(move_to_device, slow_state)
-    fast_state = jax.tree_map(move_to_device, fast_state)
-    # predicate = lambda m, n, v: m == "mini_imagenet_cnn/linear"
 
     outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
         step_size=args.outer_lr,
@@ -201,13 +239,50 @@ if __name__ == "__main__":
 
         return outer_opt_state, slow_state, fast_state, info
 
-    if jit_enabled:
-        step = jit(step)
     pbar = tqdm(range(args.num_outer_steps))
     val_outer_loss = 0
     vfol = 0
     vioa = 0
     vfoa = 0
+
+    def validation_loss_acc_fn(
+        slow_params, fast_params, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
+    ):
+        inner_opt_state = inner_opt.init(fast_params)
+        val_outer_loss, (_, _, val_info) = batched_outer_loop(
+            None,
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            False,
+            inner_opt_state,
+            x_spt,
+            y_spt,
+            x_qry,
+            y_qry,
+        )
+        return val_outer_loss, val_info
+
+    def val_sample_fn(rng):
+        return fsl_sample_transfer_and_build(
+            rng,
+            preprocess_fn,
+            val_images,
+            val_labels,
+            args.val_batch_size,
+            val_way,
+            args.shot,
+            args.qry_shot,
+            device,
+            False,
+        )
+
+    if jit_enabled:
+        step = jit(step)
+        # validate = jit(validate, static_argnums=(2, 3, 4))
+        validation_loss_acc_fn = jit(validation_loss_acc_fn)
+
     for i in pbar:
         rng, rng_sample = split(rng)
         x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
@@ -232,40 +307,25 @@ if __name__ == "__main__":
 
         if (((i + 1) % args.progress_bar_refresh_rate) == 0) or (i == 0):
             if (((i + 1) % args.val_every_k_steps) == 0) or (i == 0):
-                rng, rng_sample = split(rng)
-                x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
-                    rng_sample,
-                    preprocess_fn,
-                    val_images,
-                    val_labels,
-                    args.val_batch_size,
-                    val_way,
-                    args.shot,
-                    args.qry_shot,
-                    device,
-                    False,
-                )
+                rng, rng_validation = split(rng)
 
                 slow_params, fast_params = outer_get_params(outer_opt_state)
-                # fast_params, slow_params = hk.data_structures.partition(
-                #     predicate, params
-                # )
-                inner_opt_state = inner_opt.init(fast_params)
-                val_outer_loss, (_, _, val_info) = batched_outer_loop(
-                    None,
-                    slow_params,
-                    fast_params,
-                    slow_state,
-                    fast_state,
-                    False,
-                    inner_opt_state,
-                    x_spt,
-                    y_spt,
-                    x_qry,
-                    y_qry,
+
+                val_outer_loss, val_info = validate(
+                    rng_validation,
+                    partial(
+                        validation_loss_acc_fn,
+                        slow_params,
+                        fast_params,
+                        slow_state,
+                        fast_state,
+                    ),
+                    val_sample_fn,
+                    args.val_num_tasks,
+                    args.val_batch_size,
                 )
-                # print("val_info")
-                # print(val_info)
+
+                vfol = val_info["outer"]["final_loss"].mean()
                 vioa = val_info["outer"]["initial_aux"][0]["acc"].mean()
                 vfoa = val_info["outer"]["final_aux"][0]["acc"].mean()
 
@@ -278,7 +338,7 @@ if __name__ == "__main__":
                 # fia=f"{info['inner']['final_aux'][0]['acc'].mean():.3f}",
                 # ioa=f"{info['outer']['initial_aux'][0]['acc'].mean():.3f}",
                 foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
-                vfol=f"{val_outer_loss:.3f}",
+                vfol=f"{vfol:.3f}",
                 vioa=f"{vioa:.3f}",
                 vfoa=f"{vfoa:.3f}",
             )
