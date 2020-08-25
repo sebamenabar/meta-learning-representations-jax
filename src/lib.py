@@ -42,15 +42,6 @@ def mean_xe_and_acc(logits, targets):
 def make_fsl_inner_loop(
     slow_apply, fast_apply_and_loss_fn, opt_update_fn, num_steps, update_state=False
 ):
-    # def apply_and_loss_fn(
-    #     rng, slow_params, fast_params, state, is_training, inputs, targets
-    # ):
-    #     outputs, state, *rest1 = apply_fn(
-    #         rng, slow_params, fast_params, state, is_training, inputs,
-    #     )
-    #     loss, *rest2 = loss_fn(outputs, targets)
-    #     return loss, (state, *rest1, *rest2)
-
     def inner_loop(
         rng,
         slow_params,

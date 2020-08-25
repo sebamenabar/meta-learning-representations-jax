@@ -1,10 +1,15 @@
 import os
 import sys
 
+# import atexit
+import os.path as osp
+import pprint as pp
+
 import pickle
 import functools
 from tqdm import tqdm
 from argparse import ArgumentParser
+from omegaconf import OmegaConf
 
 import numpy as onp
 
@@ -12,15 +17,15 @@ import jax
 from jax.random import split
 from jax.tree_util import Partial as partial
 from jax import (
-    ops,
     # nn,
+    # lax,
+    ops,
     jit,
     grad,
-    value_and_grad,
-    # lax,
     vmap,
     random,
     numpy as jnp,
+    value_and_grad,
 )
 
 # from jax.experimental import stax
@@ -29,65 +34,18 @@ from jax.experimental import optimizers
 
 import haiku as hk
 
+import config
 from lib import (
     setup_device,
     mean_xe_and_acc,
     make_fsl_inner_outer_loop,
     make_batched_outer_loop,
 )
+from experiment import Experiment, Logger
 from data import prepare_data, statistics, preprocess_data
 from data.sampling import fsl_sample_transfer_and_build
 from models.activations import activations
 from models.maml_conv import MiniImagenetCNNMaker
-
-
-def parse_args():
-    parser = ArgumentParser()
-
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
-    parser.add_argument("--val_every_k_steps", type=int, default=500)
-    parser.add_argument("--disable-jit", action="store_true", default=False)
-
-    # Model settings
-    parser.add_argument("--hidden_size", type=int, default=32)
-    parser.add_argument(
-        "--activation", type=str, default="relu", choices=list(activations.keys())
-    )
-
-    # Training config settings
-    parser.add_argument("--way", type=int, required=True)
-    parser.add_argument("--shot", type=int, required=True)
-    parser.add_argument("--qry-shot", type=int, required=True)
-
-    # Training hyperparameters
-    parser.add_argument("--batch_size", type=int, required=True)
-    parser.add_argument("--val_batch_size", type=int, default=25)
-    parser.add_argument("--val_num_tasks", type=int, default=1000)
-    parser.add_argument("--inner_lr", type=float, default=5e-1)
-    parser.add_argument("--outer_lr", type=float, default=1e-2)
-    parser.add_argument("--num_outer_steps", type=int)
-    parser.add_argument("--num_inner_steps", type=int, required=True)
-    parser.add_argument(
-        "--disjoint_tasks",
-        action="store_true",
-        help="Classes between tasks do not repeat",
-        default=False,
-    )
-
-    # Data settings
-    parser.add_argument(
-        "--data_dir", type=str, default="/workspace1/samenabar/data/mini-imagenet/"
-    )
-    parser.add_argument(
-        "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
-    )
-
-    # Device settings
-    parser.add_argument("--gpus", type=int, default=0)
-    parser.add_argument("--prefetch_data_gpu", action="store_true", default=False)
-
-    return parser.parse_args()
 
 
 def loss_fn(logits, targets):
@@ -146,8 +104,20 @@ def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    print(args)
+    args, cfg = config.parse_args()
+    exp = Experiment(cfg, args)
+    exp.log_init([sys.stdout])
+    exp.comet_init()
+    sys.stderr = Logger(exp.logfile, [sys.stderr])
+    if cfg.debug:
+        exp.log("Debugging ...")
+
+    exp.log("\nCLI arguments")
+    exp.log(pp.pformat(vars(args)))
+    exp.log("\nConfiguration")
+    exp.log(pp.pformat(OmegaConf.to_container(cfg)))
+    exp.log()
+
     jit_enabled = not args.disable_jit
 
     if args.dataset == "omniglot" and args.prefetch_data_gpu:
@@ -158,7 +128,6 @@ if __name__ == "__main__":
         args.gpus, default_platform
     )  # gpu is None if args.gpus == 0
     rng = random.PRNGKey(args.seed)
-    # miniimagenet_data_dir = "/workspace1/samenabar/data/mini-imagenet/"
 
     ### DATA
     ### TEMP
@@ -171,11 +140,11 @@ if __name__ == "__main__":
         args.dataset, args.data_dir, cpu, device, args.prefetch_data_gpu,
     )
 
-    print("Train data:", train_images.shape, train_labels.shape)
-    print("Val data:", val_images.shape, val_labels.shape)
+    exp.log("Train data:", train_images.shape, train_labels.shape)
+    exp.log("Val data:", val_images.shape, val_labels.shape)
     val_way = args.way
     if args.way > val_images.shape[0]:
-        print(
+        exp.log(
             f"Training with {args.way}-way but validation only has {val_images.shape[0]} classes"
         )
         val_way = val_images.shape[0]
@@ -215,7 +184,6 @@ if __name__ == "__main__":
         step_num, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
     ):
         slow_params, fast_params = outer_get_params(outer_opt_state)
-        # fast_params, slow_params = hk.data_structures.partition(predicate, params)
         inner_opt_state = inner_opt.init(fast_params)
 
         (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
@@ -233,17 +201,9 @@ if __name__ == "__main__":
             x_qry,
             y_qry,
         )
-
-        # grads = hk.data_structures.merge(*grads)
         outer_opt_state = outer_opt_update(i, grads, outer_opt_state)
 
         return outer_opt_state, slow_state, fast_state, info
-
-    pbar = tqdm(range(args.num_outer_steps))
-    val_outer_loss = 0
-    vfol = 0
-    vioa = 0
-    vfoa = 0
 
     def validation_loss_acc_fn(
         slow_params, fast_params, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
@@ -283,6 +243,11 @@ if __name__ == "__main__":
         # validate = jit(validate, static_argnums=(2, 3, 4))
         validation_loss_acc_fn = jit(validation_loss_acc_fn)
 
+    pbar = tqdm(range(args.num_outer_steps), file=sys.stdout)
+    val_outer_loss = 0
+    vfol = 0
+    vioa = 0
+    vfoa = 0
     for i in pbar:
         rng, rng_sample = split(rng)
         x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
@@ -302,10 +267,11 @@ if __name__ == "__main__":
             i, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
         )
 
-        # print("train info")
-        # print(info)
-
         if (((i + 1) % args.progress_bar_refresh_rate) == 0) or (i == 0):
+            train_metrics = jax.tree_util.tree_map(
+                lambda x: {"mean": x.mean(), "std": x.std()}, info
+            )
+            str_train_metrics = jax.tree_util.tree_map(str, train_metrics)
             if (((i + 1) % args.val_every_k_steps) == 0) or (i == 0):
                 rng, rng_validation = split(rng)
 
@@ -326,19 +292,65 @@ if __name__ == "__main__":
                 )
 
                 vfol = val_info["outer"]["final_loss"].mean()
-                vioa = val_info["outer"]["initial_aux"][0]["acc"].mean()
                 vfoa = val_info["outer"]["final_aux"][0]["acc"].mean()
+                vioa = val_info["outer"]["initial_aux"][0]["acc"].mean()
+
+                exp.log("\n")
+                exp.log(f"---------- Step {i + 1} ----------")
+                exp.log(pbar.format_meter(**pbar.format_dict))
+
+                val_metrics = jax.tree_util.tree_map(
+                    lambda x: {"mean": x.mean(), "std": x.std()}, val_info
+                )
+                str_val_metrics = jax.tree_util.tree_map(str, val_metrics)
+                exp.log()
+                exp.log(f"       Step {i + 1} validation metrics ------")
+                exp.log(pp.pformat(str_val_metrics, indent=4))
+
+                exp.log()
+                exp.log(f"       Step {i + 1} last training batch metrics ------")
+                exp.log(pp.pformat(str_train_metrics, indent=4))
+                exp.log()
+                exp.comet.log_metrics(
+                    {
+                        "inner_final_loss": val_metrics["inner"]["final_loss"]["mean"],
+                        "inner_final_acc": val_metrics["inner"]["final_aux"][0]["acc"][
+                            "mean"
+                        ],
+                        "outer_final_loss": val_metrics["outer"]["final_loss"]["mean"],
+                        "outer_final_acc": val_metrics["outer"]["final_aux"][0]["acc"][
+                            "mean"
+                        ],
+                    },
+                    step=i + 1,
+                    prefix="val",
+                )
+
+            exp.comet.log_metrics(
+                {
+                    "inner_final_loss": train_metrics["inner"]["final_loss"]["mean"],
+                    "inner_final_acc": train_metrics["inner"]["final_aux"][0]["acc"][
+                        "mean"
+                    ],
+                    "outer_final_loss": train_metrics["outer"]["final_loss"]["mean"],
+                    "outer_final_acc": train_metrics["outer"]["final_aux"][0]["acc"][
+                        "mean"
+                    ],
+                },
+                step=i + 1,
+                prefix="train",
+            )
 
             pbar.set_postfix(
-                # iol=f"{info['outer']['initial_loss'].mean():.3f}",
+                vfol=f"{vfol:.3f}",
+                vioa=f"{vioa:.3f}",
+                vfoa=f"{vfoa:.3f}",
                 loss=f"{info['outer']['final_loss'].mean():.3f}",
+                foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
+                # iol=f"{info['outer']['initial_loss'].mean():.3f}",
                 # iil=f"{info['inner']['initial_loss'].mean():.3f}",
                 # fil=f"{info['inner']['final_loss'].mean():.3f}",
                 # iia=f"{info['inner']['initial_aux'][0]['acc'].mean():.3f}",
                 # fia=f"{info['inner']['final_aux'][0]['acc'].mean():.3f}",
                 # ioa=f"{info['outer']['initial_aux'][0]['acc'].mean():.3f}",
-                foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
-                vfol=f"{vfol:.3f}",
-                vioa=f"{vioa:.3f}",
-                vfoa=f"{vfoa:.3f}",
             )
