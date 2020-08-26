@@ -168,6 +168,7 @@ def make_batched_outer_loop(outer_loop):
         by_spt,
         bx_qry,
         by_qry,
+        num_steps,
     ):
 
         losses, (slow_states, fast_states, infos) = vmap(
@@ -179,6 +180,7 @@ def make_batched_outer_loop(outer_loop):
                 fast_state=fast_state,
                 is_training=is_training,
                 inner_opt_state=inner_opt_state,
+                num_steps=num_steps,
             )
         )(rng, bx_spt, by_spt, bx_qry, by_qry)
 

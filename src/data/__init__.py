@@ -28,9 +28,9 @@ def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False):
     if dataset == "miniimagenet":
         train_images, train_labels, _ = prepare_mi_data(data_dir, "train")
         val_images, val_labels, _ = prepare_mi_data(data_dir, "val")
-        preprocess_fn = partial(prepare_data, mean=mean, std=std)
         mean = jax.device_put(mean, device)
         std = jax.device_put(std, device)
+        preprocess_fn = partial(preprocess_data, mean=mean, std=std)
     elif dataset == "omniglot":
         train_images, train_labels = prepare_omn_data(data_dir, "train")
         val_images, val_labels = prepare_omn_data(data_dir, "val")

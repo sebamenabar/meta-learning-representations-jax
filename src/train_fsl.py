@@ -200,6 +200,7 @@ if __name__ == "__main__":
             y_spt,
             x_qry,
             y_qry,
+            args.num_inner_steps,
         )
         outer_opt_state = outer_opt_update(i, grads, outer_opt_state)
 
@@ -221,6 +222,7 @@ if __name__ == "__main__":
             y_spt,
             x_qry,
             y_qry,
+            10,
         )
         return val_outer_loss, val_info
 
