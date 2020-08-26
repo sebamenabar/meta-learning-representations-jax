@@ -245,7 +245,13 @@ if __name__ == "__main__":
         # validate = jit(validate, static_argnums=(2, 3, 4))
         validation_loss_acc_fn = jit(validation_loss_acc_fn)
 
-    pbar = tqdm(range(args.num_outer_steps), file=sys.stdout)
+    pbar = tqdm(
+        range(args.num_outer_steps),
+        file=sys.stdout,
+        miniters=25,
+        mininterval=10,
+        maxinterval=30,
+    )
     val_outer_loss = 0
     vfol = 0
     vioa = 0
