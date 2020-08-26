@@ -31,7 +31,7 @@ def parse_args():
 
     # Data settings
     parser.add_argument(
-        "--data_dir", type=str, default="/workspace1/samenabar/data/mini-imagenet/"
+        "--data_dir", type=str, default=None,
     )
     parser.add_argument(
         "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True

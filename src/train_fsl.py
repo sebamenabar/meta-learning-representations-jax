@@ -10,6 +10,7 @@ import functools
 from tqdm import tqdm
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
+import dill
 
 import numpy as onp
 
@@ -30,7 +31,9 @@ from jax import (
 
 # from jax.experimental import stax
 from jax.experimental import optix
-from jax.experimental import optimizers
+
+# from jax.experimental import optimizers
+import optax
 
 import haiku as hk
 
@@ -131,10 +134,11 @@ if __name__ == "__main__":
 
     ### DATA
     ### TEMP
-    if args.dataset == "miniimagenet":
-        args.data_dir = "/workspace1/samenabar/data/mini-imagenet/"
-    elif args.dataset == "omniglot":
-        args.data_dir = "/workspace1/samenabar/data/omniglot/"
+    if args.data_dir is None:
+        if args.dataset == "miniimagenet":
+            args.data_dir = "/workspace1/samenabar/data/mini-imagenet/"
+        elif args.dataset == "omniglot":
+            args.data_dir = "/workspace1/samenabar/data/omniglot/"
 
     train_images, train_labels, val_images, val_labels, preprocess_fn = prepare_data(
         args.dataset, args.data_dir, cpu, device, args.prefetch_data_gpu,
@@ -164,7 +168,7 @@ if __name__ == "__main__":
         device,
     )
 
-    inner_opt = optix.chain(optix.sgd(args.inner_lr))
+    inner_opt = optix.chain(optix.sgd(cfg.inner_lr))
     inner_loop, outer_loop = make_fsl_inner_outer_loop(
         slow_apply,
         fast_apply_and_loss_fn,
@@ -174,16 +178,36 @@ if __name__ == "__main__":
     )
     batched_outer_loop = make_batched_outer_loop(outer_loop)
 
-    outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
-        step_size=args.outer_lr,
+    outer_opt = optax.chain(
+        optax.clip(10),
+        optax.scale_by_adam(),
+        optax.scale_by_schedule(
+            optax.cosine_decay_schedule(
+                -cfg.outer_lr, min(20000, cfg.num_outer_steps), 0.01
+            )
+        ),
     )
-    outer_opt_state = outer_opt_init((slow_params, fast_params))
+    outer_opt_state = outer_opt.init((slow_params, fast_params))
+
+    # outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
+    #     step_size=args.outer_lr,
+    # )
+    # outer_opt_state = outer_opt_init((slow_params, fast_params))
 
     ### TRAIN FUNCTIONS
     def step(
-        step_num, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
+        step_num,
+        outer_opt_state,
+        slow_params,
+        fast_params,
+        slow_state,
+        fast_state,
+        x_spt,
+        y_spt,
+        x_qry,
+        y_qry,
     ):
-        slow_params, fast_params = outer_get_params(outer_opt_state)
+        # slow_params, fast_params = outer_get_params(outer_opt_state)
         inner_opt_state = inner_opt.init(fast_params)
 
         (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
@@ -202,9 +226,14 @@ if __name__ == "__main__":
             y_qry,
             args.num_inner_steps,
         )
-        outer_opt_state = outer_opt_update(i, grads, outer_opt_state)
+        updates, outer_opt_state = outer_opt.update(
+            grads, outer_opt_state, (slow_params, fast_params)
+        )
+        slow_params, fast_params = optax.apply_updates(
+            (slow_params, fast_params), updates
+        )
 
-        return outer_opt_state, slow_state, fast_state, info
+        return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
     def validation_loss_acc_fn(
         slow_params, fast_params, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
@@ -252,10 +281,11 @@ if __name__ == "__main__":
         mininterval=10,
         maxinterval=30,
     )
-    val_outer_loss = 0
-    vfol = 0
-    vioa = 0
-    vfoa = 0
+    val_outer_loss = 0.0
+    vfol = 0.0
+    vioa = 0.0
+    vfoa = 0.0
+    best_val_acc = 0.0
     for i in pbar:
         rng, rng_sample = split(rng)
         x_spt, y_spt, x_qry, y_qry = fsl_sample_transfer_and_build(
@@ -271,19 +301,33 @@ if __name__ == "__main__":
             args.disjoint_tasks,
         )
 
-        outer_opt_state, slow_state, fast_state, info = step(
-            i, outer_opt_state, slow_state, fast_state, x_spt, y_spt, x_qry, y_qry
+        outer_opt_state, slow_params, fast_params, slow_state, fast_state, info = step(
+            i,
+            outer_opt_state,
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            x_spt,
+            y_spt,
+            x_qry,
+            y_qry,
         )
 
         if (((i + 1) % args.progress_bar_refresh_rate) == 0) or (i == 0):
             train_metrics = jax.tree_util.tree_map(
                 lambda x: {"mean": x.mean(), "std": x.std()}, info
             )
-            str_train_metrics = jax.tree_util.tree_map(str, train_metrics)
+            str_train_metrics = jax.tree_util.tree_map(
+                lambda x: x.item(), train_metrics
+            )
+            current_lr = optax.cosine_decay_schedule(
+                cfg.outer_lr, min(20000, cfg.num_outer_steps), 0.01
+            )(outer_opt_state[-1].count)
             if (((i + 1) % args.val_every_k_steps) == 0) or (i == 0):
                 rng, rng_validation = split(rng)
 
-                slow_params, fast_params = outer_get_params(outer_opt_state)
+                # slow_params, fast_params = outer_get_params(outer_opt_state)
 
                 val_outer_loss, val_info = validate(
                     rng_validation,
@@ -306,11 +350,14 @@ if __name__ == "__main__":
                 exp.log("\n")
                 exp.log(f"---------- Step {i + 1} ----------")
                 exp.log(pbar.format_meter(**pbar.format_dict))
+                exp.log(f"\nCurrent learning rate: {current_lr}")
 
                 val_metrics = jax.tree_util.tree_map(
                     lambda x: {"mean": x.mean(), "std": x.std()}, val_info
                 )
-                str_val_metrics = jax.tree_util.tree_map(str, val_metrics)
+                str_val_metrics = jax.tree_util.tree_map(
+                    lambda x: x.item(), val_metrics
+                )
                 exp.log()
                 exp.log(f"       Step {i + 1} validation metrics ------")
                 exp.log(pp.pformat(str_val_metrics, indent=4))
@@ -319,6 +366,7 @@ if __name__ == "__main__":
                 exp.log(f"       Step {i + 1} last training batch metrics ------")
                 exp.log(pp.pformat(str_train_metrics, indent=4))
                 exp.log()
+                # Send to comet
                 exp.comet.log_metrics(
                     {
                         "inner_final_loss": val_metrics["inner"]["final_loss"]["mean"],
@@ -334,6 +382,29 @@ if __name__ == "__main__":
                     prefix="val",
                 )
 
+                new_val_acc = val_metrics["outer"]["final_aux"][0]["acc"]["mean"]
+                if new_val_acc > best_val_acc:
+                    best_val_acc = new_val_acc
+                    exp.log(f"New best validation accuracy: {new_val_acc}")
+                    exp.log("Saving checkpoint\n")
+
+                    with open(
+                        osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb"
+                    ) as f:
+                        dill.dump(
+                            {
+                                "optimizer_state": outer_opt_state,
+                                "slow_params": slow_params,
+                                "fast_params": fast_params,
+                                "slow_state": slow_state,
+                                "fast_state": fast_state,
+                                "rng": rng,
+                                "i": i,
+                            },
+                            f,
+                            protocol=3,
+                        )
+
             exp.comet.log_metrics(
                 {
                     "inner_final_loss": train_metrics["inner"]["final_loss"]["mean"],
@@ -344,12 +415,14 @@ if __name__ == "__main__":
                     "outer_final_acc": train_metrics["outer"]["final_aux"][0]["acc"][
                         "mean"
                     ],
+                    "learning_rate": current_lr,
                 },
                 step=i + 1,
                 prefix="train",
             )
 
             pbar.set_postfix(
+                lr=f"{current_lr:.4f}",
                 vfol=f"{vfol:.3f}",
                 vioa=f"{vioa:.3f}",
                 vfoa=f"{vfoa:.3f}",

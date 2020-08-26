@@ -50,9 +50,9 @@ class Experiment:
         self.cfg = cfg
         self.args = args
         self.comet_set = False
-        self.run_name = ""
+        self.run_name = cfg.run_name
         self.exp_dir = ""
-        self.exp_name = ""
+        self.exp_name = cfg.exp_name
         self.work_dir = osp.dirname(osp.dirname(osp.realpath(__file__)))
 
         self.on_create()
@@ -65,6 +65,7 @@ class Experiment:
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         self.logging = Logger(self.logfile, backends)
         atexit.register(self.logfile.close)
+        self.log(f"Experiment directory: {self.exp_dir}")
 
     def log(self, *args, **kwargs):
         return print(*args, file=self.logging, **kwargs)
@@ -133,7 +134,8 @@ class Experiment:
             i += 1
         self.run_name = run_name
         self.exp_dir = exp_dir
-        mkdir_p(self.exp_dir)
+        # mkdir_p(self.exp_dir)
+        mkdir_p(osp.join(self.exp_dir, "checkpoints"))
 
         # self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         # self.logger = Logger(self.logfile, [sys.stdout])
