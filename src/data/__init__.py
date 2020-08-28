@@ -6,6 +6,11 @@ from .miniimagenet import (
     mean as mi_mean,
     std as mi_std,
 )
+from .cifar100 import (
+    prepare_data as prepare_cifar100_data,
+    mean as cifar100_mean,
+    std as cifar100_std,
+)
 from .omniglot import (
     prepare_data as prepare_omn_data,
     # mean as omn_mean,
@@ -16,6 +21,7 @@ from .omniglot import (
 statistics = {
     "miniimagenet": (mi_mean, mi_std),
     "omniglot": (None, None),
+    "cifar100": (cifar100_mean, cifar100_std),
 }
 
 
@@ -23,7 +29,7 @@ def preprocess_data(x, mean, std):
     return (x / 255) - mean / std
 
 
-def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False):
+def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False, normalized=False):
     mean, std = statistics[dataset]
     if dataset == "miniimagenet":
         train_images, train_labels, _ = prepare_mi_data(data_dir, "train")
@@ -31,6 +37,15 @@ def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False):
         mean = jax.device_put(mean, device)
         std = jax.device_put(std, device)
         preprocess_fn = partial(preprocess_data, mean=mean, std=std)
+    if dataset == "cifar100":
+        train_images, train_labels = prepare_cifar100_data(data_dir, "train", normalized)
+        val_images, val_labels = prepare_cifar100_data(data_dir, "val", normalized)
+        mean = jax.device_put(mean, device)
+        std = jax.device_put(std, device)
+        if normalized:
+            preprocess_fn = lambda x: x
+        else:
+            preprocess_fn = partial(preprocess_data, mean=mean, std=std)
     elif dataset == "omniglot":
         train_images, train_labels = prepare_omn_data(data_dir, "train")
         val_images, val_labels = prepare_omn_data(data_dir, "val")
