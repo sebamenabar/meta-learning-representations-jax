@@ -115,11 +115,12 @@ if __name__ == "__main__":
     if cfg.debug:
         exp.log("Debugging ...")
 
-    exp.log("\nCLI arguments")
-    exp.log(pp.pformat(vars(args)))
-    exp.log("\nConfiguration")
-    exp.log(pp.pformat(OmegaConf.to_container(cfg)))
-    exp.log()
+    # Moved this to exp.log_init
+    # exp.log("\nCLI arguments")
+    # exp.log(pp.pformat(vars(args)))
+    # exp.log("\nConfiguration")
+    # exp.log(pp.pformat(OmegaConf.to_container(cfg)))
+    # exp.log()
 
     jit_enabled = not args.disable_jit
 
@@ -182,7 +183,7 @@ if __name__ == "__main__":
         optax.clip(10),
         optax.scale_by_adam(),
         optax.scale_by_schedule(
-            optax.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.01)
+            optax.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.1)
         ),
     )
     outer_opt_state = outer_opt.init((slow_params, fast_params))
@@ -421,4 +422,5 @@ if __name__ == "__main__":
                 vfoa=f"{vfoa:.3f}",
                 loss=f"{info['outer']['final_loss'].mean():.3f}",
                 foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
+                bfoa=f"{best_val_acc:.3f}",
             )
