@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 import haiku as hk
 from .activations import activations
 
@@ -13,6 +14,7 @@ class ConvBlock(hk.Module):
         activation="relu",
         normalize=True,
         name=None,
+        track_stats=False,
     ):
         super().__init__(name=name)
         self.output_channels = output_channels
@@ -31,6 +33,7 @@ class ConvBlock(hk.Module):
         else:
             self.conv_stride = self.stride[:2]
         # self.conv_stride = (1, 1)
+        self.track_stats = track_stats
 
     def __call__(self, x, is_training):
         x = hk.Conv2D(
@@ -46,7 +49,11 @@ class ConvBlock(hk.Module):
                 create_scale=True,
                 create_offset=True,
                 decay_rate=0.0,  # 0 for no tracking of stats
-            )(x, is_training=False, test_local_stats=True,)
+            )(
+                x,
+                is_training=self.track_stats and is_training,
+                test_local_stats=not self.track_stats,
+            )
         x = self.activation(x)
         if self.max_pool:
             x = hk.MaxPool(
@@ -64,6 +71,7 @@ class ConvBase(hk.Module):
         max_pool_factor=1.0,
         activation="relu",
         normalize=True,
+        track_stats=False,
         name=None,
     ):
         super().__init__(name=name)
@@ -73,6 +81,7 @@ class ConvBase(hk.Module):
         self.max_pool_factor = max_pool_factor
         self.activation = activation
         self.normalize = normalize
+        self.track_stats = track_stats
 
     def __call__(self, x, is_training):
         for _ in range(self.layers):
@@ -83,6 +92,7 @@ class ConvBase(hk.Module):
                 max_pool_factor=self.max_pool_factor,
                 activation=self.activation,
                 normalize=self.normalize,
+                track_stats=self.track_stats,
             )(x, is_training)
         return x
 
@@ -97,6 +107,7 @@ class MiniImagenetCNNBody(hk.Module):
         # name="mini_imagenet_cnn",
         name=None,
         max_pool=True,
+        track_stats=False,
     ):
         super().__init__(name=name)
         self.layers = layers
@@ -104,6 +115,7 @@ class MiniImagenetCNNBody(hk.Module):
         self.activation = activation
         self.normalize = normalize
         self.max_pool = max_pool
+        self.track_stats = track_stats
 
     def __call__(self, x, is_training):
         x = ConvBase(
@@ -111,6 +123,7 @@ class MiniImagenetCNNBody(hk.Module):
             max_pool=self.max_pool,
             layers=self.layers,
             max_pool_factor=4 // self.layers,
+            track_stats=self.track_stats,
         )(x, is_training)
         return (x,)
 
@@ -136,11 +149,20 @@ class MiniImagenetCNNHead(hk.Module):
 
 
 def MiniImagenetCNNMaker(
-    loss_fn, output_size, hidden_size, spatial_dims, max_pool, activation="relu"
+    loss_fn,
+    output_size,
+    hidden_size,
+    spatial_dims,
+    max_pool,
+    activation="relu",
+    track_stats=False,
 ):
     MiniImagenetCNNBody_t = hk.transform_with_state(
         lambda x, is_training: MiniImagenetCNNBody(
-            hidden_size=hidden_size, max_pool=max_pool, activation=activation,
+            hidden_size=hidden_size,
+            max_pool=max_pool,
+            activation=activation,
+            track_stats=track_stats,
         )(
             x, is_training,
         )
@@ -177,3 +199,38 @@ def MiniImagenetCNNMaker(
         fast_apply_and_loss_fn,
     )
 
+
+def prepare_model(loss_fn, dataset, way, hidden_size, activation, track_stats=False):
+    if dataset == "miniimagenet":
+        max_pool = True
+        spatial_dims = 25
+    elif dataset == "omniglot":
+        max_pool = False
+        spatial_dims = 4
+
+    return MiniImagenetCNNMaker(
+        loss_fn,
+        output_size=way,
+        hidden_size=hidden_size,
+        spatial_dims=spatial_dims,
+        max_pool=max_pool,
+        activation=activation,
+        track_stats=track_stats,
+    )
+
+
+def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
+    if dataset == "miniimagenet":
+        setup_tensor = jnp.zeros((2, 84, 84, 3))
+    elif dataset == "omniglot":
+        setup_tensor = jnp.zeros((2, 28, 28, 1))
+    slow_params, slow_state = slow_init(rng, setup_tensor, True)
+    slow_outputs, _ = slow_apply(rng, slow_params, slow_state, True, setup_tensor,)
+    fast_params, fast_state = fast_init(rng, *slow_outputs, True)
+    move_to_device = lambda x: jax.device_put(x, device)
+    slow_params = jax.tree_map(move_to_device, slow_params)
+    fast_params = jax.tree_map(move_to_device, fast_params)
+    slow_state = jax.tree_map(move_to_device, slow_state)
+    fast_state = jax.tree_map(move_to_device, fast_state)
+
+    return slow_params, fast_params, slow_state, fast_state
