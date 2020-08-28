@@ -111,7 +111,7 @@ if __name__ == "__main__":
     state = (slow_state, fast_state)
 
     # SGD  with momentum, wd and schedule
-    schedule = ox.piecewise_constant_schedule(-cfg.learning_rate, {60: 0.1})
+    schedule = ox.piecewise_constant_schedule(-cfg.learning_rate, {60: 0.1, 80: 0.1})
     opt = ox.chain(
         ox.trace(decay=cfg.momentum, nesterov=False),
         ox.additive_weight_decay(cfg.weight_decay),
@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
             curr_step += 1
             if ((j == 0) and (((epoch % 10) == 0) or epoch == 1)) or (
-                (epoch == cfg.epochs) and (j == len(sampler) - 1) # Last step
+                (epoch == cfg.epochs) and (j == len(sampler) - 1)  # Last step
             ):
                 rng, rng_val = split(rng)
                 start = time.time()
