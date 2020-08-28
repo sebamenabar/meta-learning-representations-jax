@@ -103,27 +103,38 @@ def batch_sampler(rng, X, y, batch_size):
         current += batch_size
         yield X[idxs], y[idxs]
 
+
 class BatchSampler:
-    def __init__(self, rng, X, y, batch_size):
+    def __init__(self, rng, X, y, batch_size, shuffle=True, keep_last=False):
         self.rng = rng
         self.X = X
         self.y = y
         self.batch_size = batch_size
-        self.__len = (len(X) // batch_size)
+        self.__len = (len(X) // batch_size) + (
+            ((len(X) % batch_size) > 0) and keep_last
+        )
+        self.shuffle = shuffle
+        self.keep_last = keep_last
 
     def __len__(self):
         return self.__len
 
     def __iter__(self):
-        rng, rng_shuffle = split(self.rng)
-        self.rng = rng
-        self.order = random.permutation(rng_shuffle, jnp.arange(len(self.X)))
+        self.order = jnp.arange(len(self.X))
+        if self.shuffle:
+            rng, rng_shuffle = split(self.rng)
+            self.rng = rng
+            self.order = random.permutation(rng_shuffle, self.order)
         self.n = 0
         return self
 
     def __next__(self):
         if self.n + self.batch_size < len(self.X):
-            idxs = self.order[self.n:self.n + self.batch_size]
+            idxs = self.order[self.n : self.n + self.batch_size]
+            self.n += self.batch_size
+            return self.X[idxs], self.y[idxs]
+        elif self.n < len(self.X) and self.keep_last:
+            idxs = self.order[self.n :]
             self.n += self.batch_size
             return self.X[idxs], self.y[idxs]
         else:
