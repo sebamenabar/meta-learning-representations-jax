@@ -51,10 +51,14 @@ def meta_test(
             spt_features = normalize(spt_features)
             qry_features = normalize(qry_features)
 
-        spt_features = jax.device_get(spt_features)
-        qry_features = jax.device_get(qry_features)
-        y_spt = jax.device_get(y_spt)
-        y_qry = jax.device_get(y_qry)
+        # spt_features = jax.device_get(spt_features)
+        # qry_features = jax.device_get(qry_features)
+        # y_spt = jax.device_get(y_spt)
+        # y_qry = jax.device_get(y_qry)
+        spt_features = onp.array(spt_features)
+        qry_features = onp.array(qry_features)
+        y_spt = onp.array(y_spt)
+        y_qry = onp.array(y_qry)
 
         targets.append(y_qry)
 
@@ -65,7 +69,7 @@ def meta_test(
         else:
             for i in range(batch_size):
                 preds.append(
-                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=8)
+                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=4)
                 )
 
     if pool is not None:
