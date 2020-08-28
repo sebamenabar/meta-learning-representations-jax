@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--val_every_k_steps", type=int, default=500)
-    parser.add_argument("--disable-jit", action="store_true", default=False)
+    parser.add_argument("--disable_jit", action="store_true", default=False)
     parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
     # Device settings
     parser.add_argument("--gpus", type=int, default=0)
@@ -45,7 +45,7 @@ def parse_args():
     # Training config settings
     parser.add_argument("--way", type=int, required=True)
     parser.add_argument("--shot", type=int, required=True)
-    parser.add_argument("--qry-shot", type=int, required=True)
+    parser.add_argument("--qry_shot", type=int, required=True)
 
     # Training hyperparameters
     parser.add_argument("--batch_size", type=int, required=True)
