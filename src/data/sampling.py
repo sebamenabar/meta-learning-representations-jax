@@ -93,3 +93,38 @@ def fsl_sample_transfer_and_build(
     y_qry = y_qry.reshape(num_tasks, way * qry_shot)
 
     return x_spt, y_spt, x_qry, y_qry
+
+
+def batch_sampler(rng, X, y, batch_size):
+    order = random.permutation(rng, jnp.arange(len(X)))
+    current = 0
+    while current + batch_size < len(X):
+        idxs = order[current : current + batch_size]
+        current += batch_size
+        yield X[idxs], y[idxs]
+
+class BatchSampler:
+    def __init__(self, rng, X, y, batch_size):
+        self.rng = rng
+        self.X = X
+        self.y = y
+        self.batch_size = batch_size
+        self.__len = (len(X) // batch_size)
+
+    def __len__(self):
+        return self.__len
+
+    def __iter__(self):
+        rng, rng_shuffle = split(self.rng)
+        self.rng = rng
+        self.order = random.permutation(rng_shuffle, jnp.arange(len(self.X)))
+        self.n = 0
+        return self
+
+    def __next__(self):
+        if self.n + self.batch_size < len(self.X):
+            idxs = self.order[self.n:self.n + self.batch_size]
+            self.n += self.batch_size
+            return self.X[idxs], self.y[idxs]
+        else:
+            raise StopIteration
