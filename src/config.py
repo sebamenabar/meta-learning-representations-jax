@@ -51,8 +51,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, required=True)
     parser.add_argument("--val_batch_size", type=int, default=25)
     parser.add_argument("--val_num_tasks", type=int, default=1000)
-    parser.add_argument("--inner_lr", type=float, default=5e-1)
-    parser.add_argument("--outer_lr", type=float, default=1e-2)
+    parser.add_argument("--inner_lr", type=float, default=1e-2)
+    parser.add_argument("--outer_lr", type=float, default=1e-3)
     parser.add_argument("--num_outer_steps", type=int)
     parser.add_argument("--num_inner_steps", type=int, required=True)
     parser.add_argument(
