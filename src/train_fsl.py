@@ -57,7 +57,7 @@ def loss_fn(logits, targets):
 
 
 def mm_fn(x, *xs):
-    return jnp.stack(jnp.array(xs)).reshape(-1)
+    return jnp.stack(xs)
 
 
 def validate(rng, loss_acc_fn, sample_fn, val_num_tasks, val_batch_size):
@@ -182,17 +182,10 @@ if __name__ == "__main__":
         optax.clip(10),
         optax.scale_by_adam(),
         optax.scale_by_schedule(
-            optax.cosine_decay_schedule(
-                -cfg.outer_lr, min(20000, cfg.num_outer_steps), 0.01
-            )
+            optax.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.01)
         ),
     )
     outer_opt_state = outer_opt.init((slow_params, fast_params))
-
-    # outer_opt_init, outer_opt_update, outer_get_params = optimizers.adam(
-    #     step_size=args.outer_lr,
-    # )
-    # outer_opt_state = outer_opt_init((slow_params, fast_params))
 
     ### TRAIN FUNCTIONS
     def step(
@@ -207,7 +200,6 @@ if __name__ == "__main__":
         x_qry,
         y_qry,
     ):
-        # slow_params, fast_params = outer_get_params(outer_opt_state)
         inner_opt_state = inner_opt.init(fast_params)
 
         (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
@@ -326,9 +318,6 @@ if __name__ == "__main__":
             )(outer_opt_state[-1].count)
             if (((i + 1) % args.val_every_k_steps) == 0) or (i == 0):
                 rng, rng_validation = split(rng)
-
-                # slow_params, fast_params = outer_get_params(outer_opt_state)
-
                 val_outer_loss, val_info = validate(
                     rng_validation,
                     partial(
@@ -367,20 +356,6 @@ if __name__ == "__main__":
                 exp.log(pp.pformat(str_train_metrics, indent=4))
                 exp.log()
                 # Send to comet
-                exp.comet.log_metrics(
-                    {
-                        "inner_final_loss": val_metrics["inner"]["final_loss"]["mean"],
-                        "inner_final_acc": val_metrics["inner"]["final_aux"][0]["acc"][
-                            "mean"
-                        ],
-                        "outer_final_loss": val_metrics["outer"]["final_loss"]["mean"],
-                        "outer_final_acc": val_metrics["outer"]["final_aux"][0]["acc"][
-                            "mean"
-                        ],
-                    },
-                    step=i + 1,
-                    prefix="val",
-                )
 
                 new_val_acc = val_metrics["outer"]["final_aux"][0]["acc"]["mean"]
                 if new_val_acc > best_val_acc:
@@ -393,6 +368,8 @@ if __name__ == "__main__":
                     ) as f:
                         dill.dump(
                             {
+                                "val_metrics": val_metrics,
+                                "train_metrics": train_metrics,
                                 "optimizer_state": outer_opt_state,
                                 "slow_params": slow_params,
                                 "fast_params": fast_params,
@@ -404,6 +381,22 @@ if __name__ == "__main__":
                             f,
                             protocol=3,
                         )
+
+                exp.comet.log_metrics(
+                    {
+                        "inner_final_loss": val_metrics["inner"]["final_loss"]["mean"],
+                        "inner_final_acc": val_metrics["inner"]["final_aux"][0]["acc"][
+                            "mean"
+                        ],
+                        "outer_final_loss": val_metrics["outer"]["final_loss"]["mean"],
+                        "outer_final_acc": val_metrics["outer"]["final_aux"][0]["acc"][
+                            "mean"
+                        ],
+                        "best_outer_final_acc": best_val_acc,
+                    },
+                    step=i + 1,
+                    prefix="val",
+                )
 
             exp.comet.log_metrics(
                 {
@@ -428,10 +421,4 @@ if __name__ == "__main__":
                 vfoa=f"{vfoa:.3f}",
                 loss=f"{info['outer']['final_loss'].mean():.3f}",
                 foa=f"{info['outer']['final_aux'][0]['acc'].mean():.3f}",
-                # iol=f"{info['outer']['initial_loss'].mean():.3f}",
-                # iil=f"{info['inner']['initial_loss'].mean():.3f}",
-                # fil=f"{info['inner']['final_loss'].mean():.3f}",
-                # iia=f"{info['inner']['initial_aux'][0]['acc'].mean():.3f}",
-                # fia=f"{info['inner']['final_aux'][0]['acc'].mean():.3f}",
-                # ioa=f"{info['outer']['initial_aux'][0]['acc'].mean():.3f}",
             )
