@@ -10,6 +10,7 @@ from datetime import datetime as dt
 from argparse import ArgumentParser
 from omegaconf import OmegaConf
 import atexit
+import pprint as pp
 
 # import wandb
 from comet_ml import Experiment as CometExperiment
@@ -66,19 +67,43 @@ class Experiment:
         self.logging = Logger(self.logfile, backends)
         atexit.register(self.logfile.close)
         self.log(f"Experiment directory: {self.exp_dir}")
+        self.log("\nCLI arguments")
+        self.log(pp.pformat(vars(self.args)))
+        self.log("\nConfiguration")
+        self.log(pp.pformat(OmegaConf.to_container(self.cfg)))
+        self.log()
 
     def log(self, *args, **kwargs):
         return print(*args, file=self.logging, **kwargs)
 
-    @classmethod
-    def add_args(cls, parser=None):
+    @staticmethod
+    def add_args(parser=None):
         if parser is None:
-            parser = ArgumentParser()
+            parser = ArgumentParser(conflict_handler='resolve')
+
+        parser.add_argument("--seed", type=int, default=0)
+        parser.add_argument("--debug", action="store_true", default=False)
+        parser.add_argument("--val_every_k_steps", type=int, default=500)
+        parser.add_argument("--disable_jit", action="store_true", default=False)
+        parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
+        # Device settings
+        parser.add_argument("--gpus", type=int, default=0)
+        parser.add_argument("--prefetch_data_gpu", action="store_true", default=False)
+
+        # Data settings
+        parser.add_argument(
+            "--data_dir", type=str, default=None,
+        )
+        parser.add_argument(
+            "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
+        )
         parser.add_argument("--run_name", type=str, default="")
         parser.add_argument("--exp_name", type=str, default="")
         parser.add_argument("--logcomet", action="store_true", default=False)
         parser.add_argument("--project", type=str, default="debug")
         parser.add_argument("--workspace", type=str, default="debug")
+
+        return parser
 
     def on_create(self):
         self.exp_init()
