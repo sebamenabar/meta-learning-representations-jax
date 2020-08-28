@@ -1,8 +1,27 @@
+import numpy as onp
 import jax
 from jax.tree_util import Partial as partial
 from jax import jit, numpy as jnp, value_and_grad, vmap
 
 from jax.experimental import optix
+
+
+def flatten(array, dims=None):
+    shape = array.shape
+    if dims is None:
+        return array.reshape(-1)
+    elif isinstance(dims, tuple):
+        assert (0 <= dims[0] < len(shape)) and (0 <= dims[1] < len(shape))
+        final_shape = (
+            *shape[: dims[0]],
+            onp.prod(shape[dims[0] : dims[1] + 1]),
+            *shape[dims[1] + 1 :],
+        )
+        return array.reshape(final_shape)
+    else:
+        assert 0 <= dims < len(shape)
+        final_shape = (onp.prod(shape[: dims + 1]), *shape[dims + 1 :])
+        return array.reshape(final_shape)
 
 
 def setup_device(gpus=0, default_platform="cpu"):
@@ -37,6 +56,12 @@ def xe_and_acc(logits, targets):
 def mean_xe_and_acc(logits, targets):
     loss, acc = xe_and_acc(logits, targets)
     return loss.mean(), acc.mean()
+
+
+@jit
+def mean_xe_and_acc_dict(logits, targets):
+    loss, acc = mean_xe_and_acc(logits, targets)
+    return loss, {"acc": acc}
 
 
 def make_fsl_inner_loop(
