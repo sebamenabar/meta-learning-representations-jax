@@ -8,6 +8,12 @@ from jax import vmap
 from jax.random import split
 
 
+@jax.jit
+def normalize(x):
+    norm = jax.numpy.linalg.norm(x, axis=-1, keepdims=True)
+    return x / norm
+
+
 def meta_test(
     rng,
     apply_fn,
@@ -42,8 +48,8 @@ def meta_test(
         qry_features = qry_features.reshape(batch_size, x_qry.shape[1], -1)
 
         if is_norm:
-            spt_features = jax.nn.normalize(spt_features)
-            qry_features = jax.nn.normalize(qry_features)
+            spt_features = normalize(spt_features)
+            qry_features = normalize(qry_features)
 
         spt_features = jax.device_get(spt_features)
         qry_features = jax.device_get(qry_features)
@@ -53,11 +59,15 @@ def meta_test(
         targets.append(y_qry)
 
         if pool is not None:
-            preds.append(pool.starmap_async(fit_fn, zip(spt_features, y_spt, qry_features)))
+            preds.append(
+                pool.starmap_async(fit_fn, zip(spt_features, y_spt, qry_features))
+            )
         else:
             for i in range(batch_size):
-                preds.append(lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=8))
-    
+                preds.append(
+                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=8)
+                )
+
     if pool is not None:
         preds = onp.concatenate([onp.stack(p.get(5)) for p in preds])
     else:
