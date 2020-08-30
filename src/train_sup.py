@@ -169,9 +169,9 @@ if __name__ == "__main__":
     sup_train_labels = flatten(sup_train_labels, 1)
     sup_val_images = flatten(sup_val_images, 1)
     sup_val_labels = flatten(sup_val_labels, 1)
-    print("Sup train data:", sup_train_images.shape, sup_train_labels.shape)
-    print("Sup val data:", sup_val_images.shape, sup_val_labels.shape)
-    print("Other tasks val data:", val_images.shape, val_labels.shape)
+    exp.log("Sup train data:", sup_train_images.shape, sup_train_labels.shape)
+    exp.log("Sup val data:", sup_val_images.shape, sup_val_labels.shape)
+    exp.log("Other tasks val data:", val_images.shape, val_labels.shape)
 
     (
         MiniImagenetCNNBody,
@@ -337,9 +337,13 @@ if __name__ == "__main__":
                     (transfer_preds == transfer_targets).astype(onp.float).mean()
                 )
 
+                exp.log(f"\nValidation epoch {epoch} results:")
+                exp.log(f"Supervised accuracy: {sup_acc}" )
+                exp.log(f"FSL accuracy: {val_acc}")
+                exp.log(f"Transfer accuracy: {transfer_acc}")
                 if sup_acc > best_sup_val_acc:
                     best_sup_val_acc = sup_acc
-                    exp.log(f"\nNew best validation accuracy: {best_sup_val_acc}")
+                    exp.log(f"\nNew best supervised validation accuracy: {best_sup_val_acc}")
                     exp.log("Saving checkpoint\n")
 
                     with open(

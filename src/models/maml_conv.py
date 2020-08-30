@@ -1,7 +1,21 @@
+from argparse import ArgumentParser
+
 import jax
 import jax.numpy as jnp
+from jax.random import split
 import haiku as hk
 from .activations import activations
+
+
+def miniimagenet_cnn_argparse(parser=None):
+    if parser is None:
+        parser = ArgumentParser()
+    parser.add_argument("--hidden_size", default=32, type=int)
+    parser.add_argument("--track_bn_stats", default=False, action="store_true")
+    parser.add_argument(
+        "--activation", type=str, default="relu", choices=list(activations.keys())
+    )
+    return parser
 
 
 class ConvBlock(hk.Module):
@@ -148,8 +162,7 @@ class MiniImagenetCNNHead(hk.Module):
         return x
 
 
-def MiniImagenetCNNMaker(
-    loss_fn,
+def make_miniimagenet_cnn(
     output_size,
     hidden_size,
     spatial_dims,
@@ -175,32 +188,29 @@ def MiniImagenetCNNMaker(
         )
     )
 
-    def slow_apply(rng, slow_params, slow_state, is_training, inputs):
-        return MiniImagenetCNNBody_t.apply(
-            slow_params, slow_state, rng, inputs, is_training,
-        )
-
-    def fast_apply_and_loss_fn(
-        rng, fast_params, fast_state, is_training, inputs, targets
-    ):
-        # params = hk.data_structures.merge(slow_params, fast_params)
-        logits, state = MiniImagenetCNNHead_t.apply(
-            fast_params, fast_state, rng, inputs, is_training
-        )
-        loss, *aux = loss_fn(logits, targets)
-        return loss, (state, *aux)
-
-        return logits, state
-
     return (
         MiniImagenetCNNBody_t,
         MiniImagenetCNNHead_t,
-        slow_apply,
-        fast_apply_and_loss_fn,
     )
 
+def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
+    slow_rng, fast_rng = split(rng)
+    if dataset == "miniimagenet":
+        setup_tensor = jnp.zeros((2, 84, 84, 3))
+    elif dataset == "omniglot":
+        setup_tensor = jnp.zeros((2, 28, 28, 1))
+    slow_params, slow_state = slow_init(slow_rng, setup_tensor, True)
+    slow_outputs, _ = slow_apply(slow_params, slow_state, slow_rng, setup_tensor, True)
+    fast_params, fast_state = fast_init(fast_rng, *slow_outputs, True)
+    move_to_device = lambda x: jax.device_put(x, device)
+    slow_params = jax.tree_map(move_to_device, slow_params)
+    fast_params = jax.tree_map(move_to_device, fast_params)
+    slow_state = jax.tree_map(move_to_device, slow_state)
+    fast_state = jax.tree_map(move_to_device, fast_state)
 
-def prepare_model(loss_fn, dataset, way, hidden_size, activation, track_stats=False):
+    return slow_params, fast_params, slow_state, fast_state
+
+def prepare_model(dataset, way, hidden_size, activation, track_stats=False):
     if dataset == "miniimagenet":
         max_pool = True
         spatial_dims = 25
@@ -208,8 +218,7 @@ def prepare_model(loss_fn, dataset, way, hidden_size, activation, track_stats=Fa
         max_pool = False
         spatial_dims = 4
 
-    return MiniImagenetCNNMaker(
-        loss_fn,
+    return make_miniimagenet_cnn(
         output_size=way,
         hidden_size=hidden_size,
         spatial_dims=spatial_dims,
@@ -219,18 +228,3 @@ def prepare_model(loss_fn, dataset, way, hidden_size, activation, track_stats=Fa
     )
 
 
-def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
-    if dataset == "miniimagenet":
-        setup_tensor = jnp.zeros((2, 84, 84, 3))
-    elif dataset == "omniglot":
-        setup_tensor = jnp.zeros((2, 28, 28, 1))
-    slow_params, slow_state = slow_init(rng, setup_tensor, True)
-    slow_outputs, _ = slow_apply(rng, slow_params, slow_state, True, setup_tensor,)
-    fast_params, fast_state = fast_init(rng, *slow_outputs, True)
-    move_to_device = lambda x: jax.device_put(x, device)
-    slow_params = jax.tree_map(move_to_device, slow_params)
-    fast_params = jax.tree_map(move_to_device, fast_params)
-    slow_state = jax.tree_map(move_to_device, slow_state)
-    fast_state = jax.tree_map(move_to_device, fast_state)
-
-    return slow_params, fast_params, slow_state, fast_state

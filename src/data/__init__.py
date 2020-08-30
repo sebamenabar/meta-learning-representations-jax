@@ -29,9 +29,12 @@ def preprocess_data(x, mean, std):
     return (x / 255) - mean / std
 
 
-def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False, normalized=False):
+def prepare_data(dataset, data_dir, device, prefetch_data_gpu=False, normalized=False):
     mean, std = statistics[dataset]
     if dataset == "miniimagenet":
+        if data_dir is None:
+            # TEMP
+            data_dir = "/mnt/ialabnas/homes/samenabar/data/FSL/mini-imagenet"
         train_images, train_labels, _ = prepare_mi_data(data_dir, "train")
         val_images, val_labels, _ = prepare_mi_data(data_dir, "val")
         mean = jax.device_put(mean, device)
@@ -51,8 +54,8 @@ def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False, normal
         val_images, val_labels = prepare_omn_data(data_dir, "val")
         preprocess_fn = lambda x: x
 
-    val_images = jax.device_put(val_images, cpu)
-    val_labels = jax.device_put(val_labels, cpu)
+    val_images = jnp.array(val_images)
+    val_labels = jnp.array(val_labels)
     if prefetch_data_gpu:
         train_images = jax.device_put(train_images, device)
         train_labels = jax.device_put(train_labels, device)
@@ -60,7 +63,7 @@ def prepare_data(dataset, data_dir, cpu, device, prefetch_data_gpu=False, normal
             val_images = jax.device_put(val_images, device)
             val_labels = jax.device_put(val_labels, device)
     else:
-        train_images = jax.device_put(train_images, cpu)
-        train_labels = jax.device_put(train_labels, cpu)
+        train_images = jnp.array(train_images)
+        train_labels = jnp.array(train_labels)
 
     return train_images, train_labels, val_images, val_labels, preprocess_fn

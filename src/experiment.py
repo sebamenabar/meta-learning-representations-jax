@@ -1,18 +1,22 @@
 import os
-import os.path as osp
 import sys
+import os.path as osp
+
 import json
 import yaml
 import errno
+import atexit
 import shutil
+import pprint as pp
 from dateutil import tz
 from datetime import datetime as dt
-from argparse import ArgumentParser
+
 from omegaconf import OmegaConf
-import atexit
-import pprint as pp
+from argparse import ArgumentParser
 
 # import wandb
+# import tensorflow as tf
+from tensorboardX import SummaryWriter
 from comet_ml import Experiment as CometExperiment
 
 
@@ -62,7 +66,7 @@ class Experiment:
         self.wandb = None
         self.logfile = None
 
-    def log_init(self, backends=None):
+    def logfile_init(self, backends=None):
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         self.logging = Logger(self.logfile, backends)
         atexit.register(self.logfile.close)
@@ -70,7 +74,10 @@ class Experiment:
         self.log("\nCLI arguments")
         self.log(pp.pformat(vars(self.args)))
         self.log("\nConfiguration")
-        self.log(pp.pformat(OmegaConf.to_container(self.cfg)))
+        if isinstance(self.cfg, OmegaConf):
+            self.log(pp.pformat(OmegaConf.to_container(self.cfg)))
+        else:
+            self.log(pp.pformat(self.cfg))
         self.log()
 
     def log(self, *args, **kwargs):
@@ -79,7 +86,7 @@ class Experiment:
     @staticmethod
     def add_args(parser=None):
         if parser is None:
-            parser = ArgumentParser(conflict_handler='resolve')
+            parser = ArgumentParser(conflict_handler="resolve")
 
         parser.add_argument("--seed", type=int, default=0)
         parser.add_argument("--debug", action="store_true", default=False)
@@ -113,6 +120,26 @@ class Experiment:
     @property
     def logcomet(self):
         return self.cfg.logcomet
+
+    def log_metrics(self, metrics, step=None, prefix=""):
+        self.comet.log_metrics(metrics, step=step, prefix=prefix)
+        for name, val in metrics.items():
+            if prefix:
+                tag = f"{prefix}_{name}"
+            else:
+                tag = name
+            self.tensorboard.add_scalar(
+                tag=tag, scalar_value=val, global_step=step,
+            )
+
+    def loggers_init(self):
+        self.comet_init()
+        self.tensorboard_init()
+
+    def tensorboard_init(self):
+        # self.tensorboard = tf.summary.create_file_writer(self.exp_dir)
+        # self.tensorboard.set_as_default()
+        self.tensorboard = SummaryWriter(logdir=self.exp_dir,)
 
     def comet_init(self):
         # if not self.logcomet:
@@ -165,7 +192,7 @@ class Experiment:
         # self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         # self.logger = Logger(self.logfile, [sys.stdout])
         # sys.stderr = Logger(self.logfile, [sys.stderr])
-        # atexit.register(self.logfile.close)
+        #  atexit.register(self.logfile.close)
 
         shutil.copytree(
             osp.join(self.work_dir, "src"),
@@ -174,11 +201,19 @@ class Experiment:
         )
 
         with open(osp.join(self.exp_dir, "cfg.json"), "w") as f:
-            json.dump(OmegaConf.to_container(self.cfg), f, indent=4)
+            if isinstance(self.cfg, OmegaConf):
+                json.dump(OmegaConf.to_container(self.cfg), f, indent=4)
+            else:
+                json.dump(self.cfg, f, indent=4)
         with open(osp.join(self.exp_dir, "cfg.yml"), "w") as f:
-            yaml.dump(
-                json.loads(json.dumps(OmegaConf.to_container(self.cfg))), f, indent=4
-            )
+            if isinstance(self.cfg, OmegaConf):
+                yaml.dump(
+                    json.loads(json.dumps(OmegaConf.to_container(self.cfg))),
+                    f,
+                    indent=4,
+                )
+            else:
+                yaml.dump(json.loads(json.dumps(self.cfg)), f, indent=4)
         if self.args is not None:
             with open(osp.join(self.exp_dir, "args.json"), "w") as f:
                 json.dump(vars(self.args), f, indent=4)

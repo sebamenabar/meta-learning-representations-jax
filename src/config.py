@@ -20,22 +20,22 @@ def rgetattr(obj, attr, *args):
 def parse_args():
     parser = ArgumentParser()
 
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--debug", action="store_true", default=False)
-    parser.add_argument("--val_every_k_steps", type=int, default=500)
-    parser.add_argument("--disable_jit", action="store_true", default=False)
-    parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
-    # Device settings
-    parser.add_argument("--gpus", type=int, default=0)
-    parser.add_argument("--prefetch_data_gpu", action="store_true", default=False)
+    # parser.add_argument("--seed", type=int, default=0)
+    # parser.add_argument("--debug", action="store_true", default=False)
+    # parser.add_argument("--val_every_k_steps", type=int, default=500)
+    # parser.add_argument("--disable_jit", action="store_true", default=False)
+    # parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
+    # # Device settings
+    # parser.add_argument("--gpus", type=int, default=0)
+    # parser.add_argument("--prefetch_data_gpu", action="store_true", default=False)
 
-    # Data settings
-    parser.add_argument(
-        "--data_dir", type=str, default=None,
-    )
-    parser.add_argument(
-        "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
-    )
+    # # Data settings
+    # parser.add_argument(
+    #     "--data_dir", type=str, default=None,
+    # )
+    # parser.add_argument(
+    #     "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
+    # )
     # Model settings
     parser.add_argument("--hidden_size", type=int, default=32)
     parser.add_argument(
