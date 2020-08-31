@@ -3,6 +3,7 @@ import sys
 import os.path as osp
 
 import dill
+import time
 from tqdm import tqdm
 from argparse import ArgumentParser
 
@@ -15,6 +16,7 @@ from jax import (
     vmap,
     random,
     partial,
+    tree_map,
     numpy as jnp,
     value_and_grad,
 )
@@ -34,6 +36,7 @@ from data import prepare_data
 from experiment import Experiment, Logger
 from data.sampling import fsl_sample_transfer_build
 from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
+from test_utils import test_fsl_maml, test_fsl_embeddings
 
 
 def parse_args(parser=None):
@@ -67,6 +70,9 @@ def parse_args(parser=None):
         help="Classes between tasks do not repeat",
         default=False,
     )
+
+    parser.add_argument("--pool", type=int, default=4)
+    parser.add_argument("--fsl_num_tasks_test", type=int, default=500)
 
     return parser
 
@@ -169,9 +175,7 @@ if __name__ == "__main__":
         "preprocess_fn": preprocess_fn,
         "device": device,
     }
-    train_sample_fn = partial(
-        fsl_sample_transfer_build, **train_sample_fn_kwargs,
-    )
+    train_sample_fn = partial(fsl_sample_transfer_build, **train_sample_fn_kwargs,)
     # Train loops
     train_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -202,6 +206,19 @@ if __name__ == "__main__":
         ),
     )
     # Val data sampling
+    test_fsl_sample_fn_kwargs = {
+        "images": val_images,
+        "labels": val_labels,
+        "batch_size": cfg.meta_batch_size_test,
+        "way": cfg.way,
+        "shot": cfg.shot,
+        "qry_shot": 15,  # Standard
+        "preprocess_fn": preprocess_fn,
+        "device": device,
+    }
+    test_fsl_sample_fn = partial(
+        fsl_sample_transfer_build, **test_fsl_sample_fn_kwargs,
+    )
     # Val loops
     test_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -223,6 +240,11 @@ if __name__ == "__main__":
     test_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=test_outer_loop_ins
     )
+    test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
+    embeddings_fn = lambda slow_params, slow_state, inputs: body.apply(
+        slow_params, slow_state, None, inputs, False
+    )[0][0]
+    embeddings_fn = jit(embeddings_fn)
     ##
 
     pbar = tqdm(
@@ -236,7 +258,14 @@ if __name__ == "__main__":
         rng, rng_step, rng_sample = split(rng, 3)
         x_spt, y_spt, x_qry, y_qry = train_sample_fn(rng_sample)
 
-        outer_opt_state, slow_params, fast_params, slow_state, fast_state, info = step_ins(
+        (
+            outer_opt_state,
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            info,
+        ) = step_ins(
             rng_step,
             i,
             outer_opt_state,
@@ -250,17 +279,57 @@ if __name__ == "__main__":
             y_qry,
         )
 
-        if (((i + 1) % cfg.progress_bar_refresh_rate) == 0) or (i == 0):
+        if (i == 0) or (((i + 1) % cfg.val_every_k_steps) == 0):
+            now = time.time()
+            rng, rng_test = split(rng)
+            fsl_maml_results = test_fsl_maml(
+                rng,
+                slow_params,
+                fast_params,
+                slow_state,
+                fast_state,
+                cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
+                inner_opt.init,
+                test_fsl_sample_fn,
+                test_batched_outer_loop_ins,
+            )
+            fsl_maml_loss = fsl_maml_results[0].mean()
+            fsl_maml_acc = fsl_maml_results[1]["outer"]["final"]["aux"][0]["acc"].mean()
+
+            fsl_embeddings_preds, fsl_embeddings_targets = test_fsl_embeddings(
+                rng_test,
+                partial(embeddings_fn, slow_params, slow_state),
+                test_fsl_sample_fn,
+                cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
+                device=device,
+                pool=cfg.pool,
+            )
+            fsl_embeddings_acc = (
+                (fsl_embeddings_preds == fsl_embeddings_targets)
+                .astype(onp.float)
+                .mean()
+            )
+
+            test_time = time.time() - now
+
+        if (
+            (i == 0)
+            or (((i + 1) % cfg.progress_bar_refresh_rate) == 0)
+            or (((i + 1) % cfg.val_every_k_steps) == 0)
+        ):
             current_lr = lr_schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
+                ttime=f"{test_time:.1f}",
+                loss=f"{info['outer']['final']['loss'].mean():.2f}",
+                foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.2f}",
+                vam=f"{fsl_maml_acc:.2f}",
+                vae=f"{fsl_embeddings_acc:.2f}",
                 # vfol=f"{vfol:.3f}",
                 # vioa=f"{vioa:.3f}",
                 # vfoa=f"{vfoa:.3f}",
-                loss=f"{info['outer']['final']['loss'].mean():.3f}",
-                foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.3f}",
                 # bfoa=f"{best_val_acc:.3f}",
-                fia=f"{info['inner']['auxs'][0]['acc'][:, -1].mean():.3f}",
-                iil=f"{info['inner']['losses'][:, 0].mean():.3f}",
-                fil=f"{info['inner']['losses'][:, -1].mean():.3f}",
+                # fia=f"{info['inner']['auxs'][0]['acc'][:, -1].mean():.3f}",
+                # iil=f"{info['inner']['losses'][:, 0].mean():.3f}",
+                # fil=f"{info['inner']['losses'][:, -1].mean():.3f}",
             )
