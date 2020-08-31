@@ -14,6 +14,7 @@ from jax import (
     jit,
     vmap,
     random,
+    partial,
     numpy as jnp,
     value_and_grad,
 )
@@ -21,10 +22,18 @@ from jax import (
 import optax as ox
 import haiku as hk
 
+from lib import (
+    outer_loop,
+    setup_device,
+    fsl_inner_loop,
+    batched_outer_loop,
+    parse_and_build_cfg,
+    mean_xe_and_acc_dict,
+)
+from data import prepare_data
 from experiment import Experiment, Logger
-from trainers.meta_trainer import MetaTrainer
-from lib import parse_and_build_cfg, setup_device
-from models.maml_conv import miniimagenet_cnn_argparse
+from data.sampling import fsl_sample_transfer_build
+from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
 
 
 def parse_args(parser=None):
@@ -34,12 +43,15 @@ def parse_args(parser=None):
     parser.add_argument(
         "--meta_batch_size", help="Number of FSL tasks", default=20, type=int
     )
+    parser.add_argument(
+        "--meta_batch_size_test", help="Number of FSL tasks", default=25, type=int
+    )
     parser.add_argument("--way", help="Number of classes per task", default=5, type=int)
     parser.add_argument(
         "--shot", help="Number of samples per class", default=5, type=int
     )
     parser.add_argument(
-        "--qry_shot", type=int, help="Number of quried samples per class", default=15
+        "--qry_shot", type=int, help="Number of quried samples per class", default=10,
     )
 
     # Optimization arguments
@@ -57,6 +69,46 @@ def parse_args(parser=None):
     )
 
     return parser
+
+
+def step(
+    rng,
+    step_num,
+    outer_opt_state,
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    x_spt,
+    y_spt,
+    x_qry,
+    y_qry,
+    inner_opt_init,
+    outer_opt_update,
+    batched_outer_loop_ins,
+):
+    inner_opt_state = inner_opt_init(fast_params)
+
+    (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
+        batched_outer_loop_ins, (0, 1), has_aux=True
+    )(
+        slow_params,
+        fast_params,
+        slow_state,
+        fast_state,
+        inner_opt_state,
+        split(rng, x_spt.shape[0]),
+        x_spt,
+        y_spt,
+        x_qry,
+        y_qry,
+    )
+    updates, outer_opt_state = outer_opt_update(
+        grads, outer_opt_state, (slow_params, fast_params)
+    )
+    slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
+
+    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
 
 if __name__ == "__main__":
@@ -82,9 +134,133 @@ if __name__ == "__main__":
     # it recommended for any big (bigger than omniglot) dataset
     cpu, device = setup_device(cfg.gpus, default_platform="cpu")
     rng = random.PRNGKey(cfg.seed)  # Default seed is 0
-    rng, rng_trainer = split(rng)
-    trainer = MetaTrainer(rng_trainer, cfg, exp, cpu, device)
+    exp.log(f"Running on {device} with seed: {cfg.seed}")
 
-    if jit_enabled:
-        step = jit(trainer.step, static_argnums=0)
+    # Data
+    train_images, train_labels, val_images, val_labels, preprocess_fn = prepare_data(
+        cfg.dataset, cfg.data_dir, device,
+    )
+    exp.log("Train data:", train_images.shape, train_labels.shape)
+    exp.log("Val data:", val_images.shape, val_labels.shape)
 
+    # Model
+    body, head = prepare_model(cfg.dataset, cfg.way, cfg.hidden_size, cfg.activation)
+    rng, rng_params = split(rng)
+    (slow_params, fast_params, slow_state, fast_state,) = make_params(
+        rng, cfg.dataset, body.init, body.apply, head.init, device,
+    )
+
+    # Optimizers
+    inner_opt = ox.sgd(cfg.inner_lr)
+    lr_schedule = ox.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.1)
+    outer_opt = ox.chain(
+        ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(lr_schedule),
+    )
+    outer_opt_state = outer_opt.init((slow_params, fast_params))
+
+    # Train data sampling
+    train_sample_fn_kwargs = {
+        "images": train_images,
+        "labels": train_labels,
+        "batch_size": cfg.meta_batch_size,
+        "way": cfg.way,
+        "shot": cfg.shot,
+        "qry_shot": cfg.qry_shot,
+        "preprocess_fn": preprocess_fn,
+        "device": device,
+    }
+    train_sample_fn = partial(
+        fsl_sample_transfer_build, **train_sample_fn_kwargs,
+    )
+    # Train loops
+    train_inner_loop_ins = partial(
+        fsl_inner_loop,
+        is_training=True,
+        num_steps=cfg.num_inner_steps_train,
+        slow_apply=body.apply,
+        fast_apply=head.apply,
+        loss_fn=mean_xe_and_acc_dict,
+        opt_update_fn=inner_opt.update,
+    )
+    train_outer_loop_ins = partial(
+        outer_loop,
+        is_training=True,
+        inner_loop=train_inner_loop_ins,
+        slow_apply=body.apply,
+        fast_apply=head.apply,
+        loss_fn=mean_xe_and_acc_dict,
+    )
+    train_batched_outer_loop_ins = partial(
+        batched_outer_loop, outer_loop=train_outer_loop_ins
+    )
+    step_ins = jit(
+        partial(
+            step,
+            inner_opt_init=inner_opt.init,
+            outer_opt_update=outer_opt.update,
+            batched_outer_loop_ins=train_batched_outer_loop_ins,
+        ),
+    )
+    # Val data sampling
+    # Val loops
+    test_inner_loop_ins = partial(
+        fsl_inner_loop,
+        is_training=False,
+        num_steps=cfg.num_inner_steps_test,
+        slow_apply=body.apply,
+        fast_apply=head.apply,
+        loss_fn=mean_xe_and_acc_dict,
+        opt_update_fn=inner_opt.update,
+    )
+    test_outer_loop_ins = partial(
+        outer_loop,
+        is_training=False,
+        inner_loop=test_inner_loop_ins,
+        slow_apply=body.apply,
+        fast_apply=head.apply,
+        loss_fn=mean_xe_and_acc_dict,
+    )
+    test_batched_outer_loop_ins = partial(
+        batched_outer_loop, outer_loop=test_outer_loop_ins
+    )
+    ##
+
+    pbar = tqdm(
+        range(cfg.num_outer_steps),
+        file=sys.stdout,
+        miniters=25,
+        mininterval=10,
+        maxinterval=30,
+    )
+    for i in pbar:
+        rng, rng_step, rng_sample = split(rng, 3)
+        x_spt, y_spt, x_qry, y_qry = train_sample_fn(rng_sample)
+
+        outer_opt_state, slow_params, fast_params, slow_state, fast_state, info = step_ins(
+            rng_step,
+            i,
+            outer_opt_state,
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            x_spt,
+            y_spt,
+            x_qry,
+            y_qry,
+        )
+
+        if (((i + 1) % cfg.progress_bar_refresh_rate) == 0) or (i == 0):
+            current_lr = lr_schedule(outer_opt_state[-1].count)
+            pbar.set_postfix(
+                lr=f"{current_lr:.4f}",
+                # vfol=f"{vfol:.3f}",
+                # vioa=f"{vioa:.3f}",
+                # vfoa=f"{vfoa:.3f}",
+                loss=f"{info['outer']['final']['loss'].mean():.3f}",
+                foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.3f}",
+                # bfoa=f"{best_val_acc:.3f}",
+                fia=f"{info['inner']['auxs'][0]['acc'][:, -1].mean():.3f}",
+                iil=f"{info['inner']['losses'][:, 0].mean():.3f}",
+                fil=f"{info['inner']['losses'][:, -1].mean():.3f}",
+            )
