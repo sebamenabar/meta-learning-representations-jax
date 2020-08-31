@@ -32,6 +32,7 @@ from lib import (
     batched_outer_loop,
     parse_and_build_cfg,
     mean_xe_and_acc_dict,
+    # outer_loop_reset_per_task,
 )
 from data import prepare_data
 from experiment import Experiment, Logger
@@ -64,7 +65,10 @@ def parse_args(parser=None):
 
     # Optimization arguments
     parser.add_argument(
-        "--train_method", type=str, default="fsl", choices=["fsl", "fsl-reset"],
+        "--train_method",
+        type=str,
+        default="fsl",
+        choices=["fsl", "fsl-reset-zero", "fsl-reset-per-task"],
     )
     parser.add_argument("--inner_lr", type=float, default=1e-2)
     parser.add_argument("--outer_lr", type=float, default=1e-3)
@@ -96,10 +100,11 @@ def step(
     y_spt,
     x_qry,
     y_qry,
+    spt_classes,
     inner_opt_init,
     outer_opt_update,
     batched_outer_loop_ins,
-    train_method=None, # Just for compatibility
+    train_method=None,  # Just for compatibility
 ):
     inner_opt_state = inner_opt_init(fast_params)
 
@@ -116,6 +121,7 @@ def step(
         y_spt,
         x_qry,
         y_qry,
+        spt_classes,
     )
     updates, outer_opt_state = outer_opt_update(
         grads, outer_opt_state, (slow_params, fast_params)
@@ -137,12 +143,13 @@ def step_reset(
     y_spt,
     x_qry,
     y_qry,
+    spt_classes,
     inner_opt_init,
     outer_opt_update,
     batched_outer_loop_ins,
     train_method,
 ):
-    if train_method == "fsl-reset":
+    if train_method == "fsl-reset-zero":
         fast_params = hk.data_structures.merge(
             {
                 "mini_imagenet_cnn_head/linear": {
@@ -170,10 +177,9 @@ def step_reset(
         y_spt,
         x_qry,
         y_qry,
+        spt_classes,
     )
-    updates, outer_opt_state = outer_opt_update(
-        grads, outer_opt_state, slow_params,
-    )
+    updates, outer_opt_state = outer_opt_update(grads, outer_opt_state, slow_params,)
     slow_params = ox.apply_updates(slow_params, updates)
 
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
@@ -223,7 +229,9 @@ if __name__ == "__main__":
     # Model
     if cfg.train_method == "fsl":
         output_size = cfg.way
-    elif (cfg.train_method == "fsl-reset"):
+    elif (cfg.train_method == "fsl-reset") or (
+        cfg.train_method == "fsl-reset-per-task"
+    ):
         output_size = sup_train_images.shape[0]
     body, head = prepare_model(
         cfg.dataset, output_size, cfg.hidden_size, cfg.activation
@@ -239,9 +247,9 @@ if __name__ == "__main__":
     outer_opt = ox.chain(
         ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(lr_schedule),
     )
-    if cfg.train_method == "fsl":
+    if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
         outer_opt_state = outer_opt.init((slow_params, fast_params))
-    elif cfg.train_method == "fsl-reset":
+    elif cfg.train_method == "fsl-reset-zero":
         outer_opt_state = outer_opt.init(slow_params)
 
     # Train data sampling
@@ -274,11 +282,12 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
+        train_method=cfg.train_method,
     )
     train_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=train_outer_loop_ins
     )
-    if cfg.train_method == "fsl":
+    if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
         step_ins = step
     elif cfg.train_method == "fsl-reset":
         step_ins = step_reset
@@ -340,7 +349,7 @@ if __name__ == "__main__":
         loss_fn=mean_xe_and_acc_dict,
     )
     test_batched_outer_loop_ins = partial(
-        batched_outer_loop, outer_loop=test_outer_loop_ins
+        batched_outer_loop, outer_loop=test_outer_loop_ins, spt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     # Test embeddings
@@ -360,6 +369,7 @@ if __name__ == "__main__":
     for i in pbar:
         rng, rng_step, rng_sample = split(rng, 3)
         x_spt, y_spt, x_qry, y_qry = train_sample_fn(rng_sample)
+        spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
 
         (
             outer_opt_state,
@@ -380,6 +390,7 @@ if __name__ == "__main__":
             y_spt,
             x_qry,
             y_qry,
+            spt_classes,
         )
 
         if (i == 0) or (((i + 1) % cfg.val_every_k_steps) == 0):

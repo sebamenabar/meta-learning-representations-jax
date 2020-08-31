@@ -6,9 +6,9 @@ import numpy as onp
 import jax
 from jax.random import split
 from jax.tree_util import Partial as partial
-from jax import jit, numpy as jnp, value_and_grad, vmap, tree_multimap
+from jax import jit, numpy as jnp, value_and_grad, vmap, tree_multimap, ops
 
-# from jax.experimental import optix
+import haiku as hk
 import optax as ox
 
 
@@ -117,6 +117,7 @@ def batched_outer_loop(
     by_spt,
     bx_qry,
     by_qry,
+    spt_classes,
     outer_loop,
 ):
     losses, aux = vmap(
@@ -128,7 +129,7 @@ def batched_outer_loop(
             fast_state,
             inner_opt_state,
         )
-    )(brng, bx_spt, by_spt, bx_qry, by_qry)
+    )(brng, bx_spt, by_spt, bx_qry, by_qry, spt_classes)
     return losses.mean(), aux
 
 
@@ -143,12 +144,34 @@ def outer_loop(
     y_spt,
     x_qry,
     y_qry,
+    spt_classes,
     is_training,
     inner_loop,  # instantiated inner_loop
     slow_apply,
     fast_apply,
     loss_fn,
+    train_method=None,
 ):
+    if train_method == "fsl-reset-per-task":
+        print("Resetting fast params per task")
+        fast_params = hk.data_structures.merge(
+            {
+                "mini_imagenet_cnn_head/linear": {
+                    "w": ops.index_update(
+                        fast_params["mini_imagenet_cnn_head/linear"]["w"],
+                        ops.index[:, spt_classes],
+                        jnp.zeros(
+                            (
+                                fast_params["mini_imagenet_cnn_head/linear"]["w"].shape[
+                                    0
+                                ],
+                                spt_classes.shape[0],
+                            )
+                        ),
+                    )
+                }
+            }
+        )
     _fast_apply_and_loss_fn = partial(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
