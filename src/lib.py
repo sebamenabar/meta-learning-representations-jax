@@ -6,7 +6,7 @@ import numpy as onp
 import jax
 from jax.random import split
 from jax.tree_util import Partial as partial
-from jax import jit, numpy as jnp, value_and_grad, vmap
+from jax import jit, numpy as jnp, value_and_grad, vmap, tree_multimap
 
 # from jax.experimental import optix
 import optax as ox
@@ -90,12 +90,12 @@ def mean_xe_and_acc_dict(logits, targets):
 
 
 def fast_apply_and_loss_fn(
-    rng,
-    slow_outputs,
-    targets,
     fast_params,
     fast_state,
+    rng,
+    slow_outputs,
     is_training,
+    targets,
     fast_apply,
     loss_fn,
 ):
@@ -107,67 +107,71 @@ def fast_apply_and_loss_fn(
 
 
 def batched_outer_loop(
-    rng, slow_params, fast_params, bx_spt, by_spt, bx_qry, by_qry, partial_outer_loop
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    inner_opt_state,
+    brng,
+    bx_spt,
+    by_spt,
+    bx_qry,
+    by_qry,
+    outer_loop,
 ):
-    rngs = split(rng, bx_spt.shape[0])
-    partial_partial_outer_loop = partial(
-        partial_outer_loop, slow_params=slow_params, fast_params=fast_params
-    )
-    losses, aux = vmap(partial_partial_outer_loop)(rngs, bx_spt, by_spt, bx_qry, by_qry)
+    losses, aux = vmap(
+        partial(
+            outer_loop,
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            inner_opt_state,
+        )
+    )(brng, bx_spt, by_spt, bx_qry, by_qry)
     return losses.mean(), aux
 
 
 def outer_loop(
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    inner_opt_state,
     rng,
     x_spt,
     y_spt,
     x_qry,
     y_qry,
-    slow_params,
-    fast_params,
-    slow_state,
-    fast_state,
     is_training,
-    inner_opt,
-    num_steps,
-    inner_loop,
+    inner_loop,  # instantiated inner_loop
     slow_apply,
     fast_apply,
     loss_fn,
-    inner_opt_state=None,
-    update_state=False,
 ):
     _fast_apply_and_loss_fn = partial(
-        fast_apply_and_loss_fn,
-        is_training=is_training,
-        fast_apply=fast_apply,
-        loss_fn=loss_fn,
+        fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
     rng_outer_slow, rng_outer_fast, rng_inner = split(rng, 3)
     slow_outputs, initial_slow_state = slow_apply(
         slow_params, slow_state, rng_outer_slow, x_qry, is_training,
     )
-    initial_loss, (initial_fast_state, *initial_aux) = _fast_apply_and_loss_fn(
-        rng_outer_fast, slow_outputs, y_qry, fast_params, fast_state,
+    initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
+        fast_params, fast_state, rng_outer_fast, slow_outputs, False, y_qry,
     )
-    if inner_opt_state is None:
-        inner_opt_state = inner_opt.init(fast_params)
+
     fast_params, inner_slow_state, fast_state, inner_opt_state, inner_auxs = inner_loop(
+        slow_params,
+        fast_params,
+        slow_state,
+        fast_state,
+        inner_opt_state,
         rng_inner,
         x_spt,
         y_spt,
-        is_training,
-        inner_opt_state,
-        fast_params,
-        fast_state,
-        num_steps,
-        partial(slow_apply, slow_params, slow_state),
-        fast_apply,
-        loss_fn,
-        inner_opt.update,
     )
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        rng_outer_fast, slow_outputs, y_qry, fast_params, fast_state,
+        fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
     )
     return (
         final_loss,
@@ -186,54 +190,75 @@ def outer_loop(
 
 
 def fsl_inner_loop(
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    opt_state,
     rng,
     inputs,
     targets,
     is_training,
-    opt_state,
-    fast_params,
-    fast_state,
     num_steps,
-    slow_apply,  # Does NOT require slow_params or slow_state as input
-    fast_apply,  # REQUIRES fast_params and fast_state as input
-    loss_fn,  # Inputs are fast_apply outputs and targets
+    slow_apply,
+    fast_apply,
+    loss_fn,
     opt_update_fn,
     update_state=False,
+    return_history=True,
 ):
     _fast_apply_and_loss_fn = partial(
-        fast_apply_and_loss_fn,
-        # is_training=is_training,
-        fast_apply=fast_apply,
-        loss_fn=loss_fn,
+        fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
     rng_slow, *rngs = split(rng, num_steps + 2)
-    slow_outputs, slow_state = slow_apply(rng, inputs, is_training)
+    slow_outputs, slow_state = slow_apply(
+        slow_params, slow_state, rng_slow, inputs, is_training,
+    )
+
     losses = []
     auxs = []
-    # rngs = split(rng, num_steps + 1)
+
     for i in range(num_steps):
         (loss, (new_fast_state, *aux)), grads = value_and_grad(
-            _fast_apply_and_loss_fn, 3, has_aux=True
-        )(rngs[i], slow_outputs, targets, fast_params, fast_state, is_training)
+            _fast_apply_and_loss_fn, has_aux=True
+        )(fast_params, fast_state, rngs[i], slow_outputs, is_training, targets)
         if update_state:
             fast_state = new_fast_state
-        losses.append(loss)
-        auxs.append(aux)
+        if i == 0:
+            initial_loss = loss
+            initial_aux = aux
+
+        if return_history:
+            losses.append(loss)
+            auxs.append(aux)
+
         updates, opt_state = opt_update_fn(grads, opt_state, fast_params)
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        rngs[i + 1], slow_outputs, targets, fast_params, fast_state, False,
+        fast_params, fast_state, rngs[i + 1], slow_outputs, is_training, targets,
     )
-    losses.append(final_loss)
-    auxs.append(final_aux)
+    if return_history:
+        losses.append(final_loss)
+        auxs.append(final_aux)
+        info = {
+            "losses": jnp.stack(losses),
+            "auxs": tree_multimap(lambda x, *xs: jnp.stack(xs), auxs[0], *auxs),
+        }
+    else:
+        info = (
+            {
+                "losses": {"initial": initial_loss, "final": final_loss},
+                "auxs": {"initial": initial_aux, "final": final_aux},
+            },
+        )
 
     return (
         fast_params,
         slow_state,
         fast_state,
         opt_state,
-        {"losses": losses, "auxs": auxs},
+        info,
     )
 
 
