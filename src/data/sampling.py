@@ -46,16 +46,14 @@ def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
     return sampled_images, sampled_labels
 
 
-def fsl_sample_and_build(
+def fsl_sample(
     rng,
-    # preprocess_fn,
     images,
     labels,
     num_tasks,
     way,
     spt_shot,
     qry_shot,
-    # device=None,
     disjoint=True,
     shuffled_labels=True,
 ):
@@ -76,29 +74,37 @@ def fsl_sample_and_build(
         )
     else:
         labels = sampled_labels
-
-    # Transfer ints but operate on gpu
-    # sampled_images = jax.device_put(sampled_images, device)
-    # shuffled_labels = jax.device_put(labels, device)
-
-    images_shape = sampled_images.shape[3:]
-    # sampled_images = ((sampled_images / 255) - mean) / std
-    # sampled_images = preprocess_fn(sampled_images)
-
-    # Transfer floats but operate on cpu
-    # sampled_images = jax.device_put(sampled_images, gpu)
-    # shuffled_labels = jax.device_put(shuffled_labels, gpu)
-
-    # x_spt, x_qry = jnp.split(sampled_images, (spt_shot,), 2)
-    # x_spt = x_spt.reshape(num_tasks, way * spt_shot, *images_shape)
-    # x_qry = x_qry.reshape(num_tasks, way * qry_shot, *images_shape)
-    # y_spt, y_qry = jnp.split(labels, (spt_shot,), 2)
-    # y_spt = y_spt.reshape(num_tasks, way * spt_shot)
-    # y_qry = y_qry.reshape(num_tasks, way * qry_shot)
-
-
-    # return x_spt, y_spt, x_qry, y_qry
     return sampled_images, labels
+
+
+def fsl_sample_transfer_build(
+    rng,
+    images,
+    labels,
+    batch_size,
+    way,
+    shot,
+    qry_shot,
+    preprocess_fn,
+    device=None,
+    disjoint=False,
+    shuffled_labels=True,
+):
+    x, y = fsl_sample(
+        rng, images, labels, batch_size, way, shot, qry_shot, disjoint, shuffled_labels,
+    )
+    x = preprocess_fn(jax.device_put(x, device))
+    y = jax.device_put(y, device)
+
+    image_shape = x.shape[-3:]
+    x_spt, x_qry = jnp.split(x, (shot,), 2)
+    x_spt = x_spt.reshape(batch_size, way * shot, *image_shape)
+    x_qry = x_qry.reshape(batch_size, way * qry_shot, *image_shape)
+    y_spt, y_qry = jnp.split(y, (shot,), 2)
+    y_spt = y_spt.reshape(batch_size, way * shot)
+    y_qry = y_qry.reshape(batch_size, way * qry_shot)
+    return x_spt, y_spt, x_qry, y_qry
+
 
 def batch_sampler(rng, X, y, batch_size):
     order = random.permutation(rng, jnp.arange(len(X)))
