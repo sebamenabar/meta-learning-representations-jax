@@ -155,7 +155,7 @@ class MiniImagenetCNNHead(hk.Module):
         x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
         x = hk.Linear(
             self.output_size,
-            with_bias=True,
+            with_bias=False,
             w_init=hk.initializers.VarianceScaling(1.0, "fan_avg", "uniform"),
             b_init=hk.initializers.Constant(0.0),
         )(x)
