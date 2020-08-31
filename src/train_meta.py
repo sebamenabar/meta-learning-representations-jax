@@ -25,6 +25,7 @@ import optax as ox
 import haiku as hk
 
 from lib import (
+    flatten,
     outer_loop,
     setup_device,
     fsl_inner_loop,
@@ -34,9 +35,12 @@ from lib import (
 )
 from data import prepare_data
 from experiment import Experiment, Logger
-from data.sampling import fsl_sample_transfer_build
+from data.sampling import fsl_sample_transfer_build, BatchSampler
 from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
 from test_utils import test_fsl_maml, test_fsl_embeddings
+from test_sup import test_sup_cosine
+
+TRAIN_SIZE = 500
 
 
 def parse_args(parser=None):
@@ -49,6 +53,7 @@ def parse_args(parser=None):
     parser.add_argument(
         "--meta_batch_size_test", help="Number of FSL tasks", default=25, type=int
     )
+    parser.add_argument("--sup_batch_size_test", default=512, type=int)
     parser.add_argument("--way", help="Number of classes per task", default=5, type=int)
     parser.add_argument(
         "--shot", help="Number of samples per class", default=5, type=int
@@ -146,8 +151,17 @@ if __name__ == "__main__":
     train_images, train_labels, val_images, val_labels, preprocess_fn = prepare_data(
         cfg.dataset, cfg.data_dir, device,
     )
-    exp.log("Train data:", train_images.shape, train_labels.shape)
-    exp.log("Val data:", val_images.shape, val_labels.shape)
+    sup_train_images = train_images[:, :TRAIN_SIZE]
+    sup_train_labels = train_labels[:, :TRAIN_SIZE]
+    # These are for supervised learning validation
+    sup_val_images = train_images[:, TRAIN_SIZE:]
+    sup_val_labels = train_labels[:, TRAIN_SIZE:]
+    exp.log(
+        "Supervised validation data:", sup_val_images.shape, sup_val_labels.shape,
+    )
+    exp.log(
+        "FSL and Transfer learning data:", val_images.shape, val_labels.shape,
+    )
 
     # Model
     body, head = prepare_model(cfg.dataset, cfg.way, cfg.hidden_size, cfg.activation)
@@ -166,8 +180,8 @@ if __name__ == "__main__":
 
     # Train data sampling
     train_sample_fn_kwargs = {
-        "images": train_images,
-        "labels": train_labels,
+        "images": sup_train_images,
+        "labels": sup_train_labels,
         "batch_size": cfg.meta_batch_size,
         "way": cfg.way,
         "shot": cfg.shot,
@@ -219,6 +233,22 @@ if __name__ == "__main__":
     test_fsl_sample_fn = partial(
         fsl_sample_transfer_build, **test_fsl_sample_fn_kwargs,
     )
+    test_sup_spt_sampler = BatchSampler(
+        rng,
+        flatten(sup_train_images, 1),
+        flatten(sup_train_labels),
+        cfg.sup_batch_size_test,
+        shuffle=False,
+        keep_last=True,
+    )
+    test_sup_qry_sampler = BatchSampler(
+        rng,
+        flatten(sup_val_images, 1),
+        flatten(sup_val_labels),
+        cfg.sup_batch_size_test,
+        shuffle=False,
+        keep_last=True,
+    )
     # Val loops
     test_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -241,6 +271,7 @@ if __name__ == "__main__":
         batched_outer_loop, outer_loop=test_outer_loop_ins
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
+    # Test embeddings
     embeddings_fn = lambda slow_params, slow_state, inputs: body.apply(
         slow_params, slow_state, None, inputs, False
     )[0][0]
@@ -310,6 +341,15 @@ if __name__ == "__main__":
                 .mean()
             )
 
+            sup_preds, sup_targets = test_sup_cosine(
+                partial(embeddings_fn, slow_params, slow_state),
+                test_sup_spt_sampler,
+                test_sup_qry_sampler,
+                device,
+                preprocess_fn,
+            )
+            sup_acc = (sup_preds == sup_targets).astype(onp.float).mean()
+
             test_time = time.time() - now
 
         if (
@@ -325,6 +365,7 @@ if __name__ == "__main__":
                 foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.2f}",
                 vam=f"{fsl_maml_acc:.2f}",
                 vae=f"{fsl_embeddings_acc:.2f}",
+                vas=f"{sup_acc:.2f}",
                 # vfol=f"{vfol:.3f}",
                 # vioa=f"{vioa:.3f}",
                 # vfoa=f"{vfoa:.3f}",
