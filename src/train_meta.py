@@ -63,7 +63,9 @@ def parse_args(parser=None):
     )
 
     # Optimization arguments
-    parser.add_argument("--train_method", type=str, default="fsl", choices=["fsl"])
+    parser.add_argument(
+        "--train_method", type=str, default="fsl", choices=["fsl", "fsl-reset"],
+    )
     parser.add_argument("--inner_lr", type=float, default=1e-2)
     parser.add_argument("--outer_lr", type=float, default=1e-3)
     parser.add_argument("--num_inner_steps_train", type=int, default=5)
@@ -97,6 +99,7 @@ def step(
     inner_opt_init,
     outer_opt_update,
     batched_outer_loop_ins,
+    train_method=None, # Just for compatibility
 ):
     inner_opt_state = inner_opt_init(fast_params)
 
@@ -118,6 +121,60 @@ def step(
         grads, outer_opt_state, (slow_params, fast_params)
     )
     slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
+
+    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
+
+
+def step_reset(
+    rng,
+    step_num,
+    outer_opt_state,
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    x_spt,
+    y_spt,
+    x_qry,
+    y_qry,
+    inner_opt_init,
+    outer_opt_update,
+    batched_outer_loop_ins,
+    train_method,
+):
+    if train_method == "fsl-reset":
+        fast_params = hk.data_structures.merge(
+            {
+                "mini_imagenet_cnn_head/linear": {
+                    "w": jnp.zeros(
+                        fast_params["mini_imagenet_cnn_head/linear"]["w"].shape
+                    ),
+                }
+            }
+        )
+    else:
+        raise NameError(f"Unkwown train method `{train_method}`")
+
+    inner_opt_state = inner_opt_init(fast_params)
+
+    (outer_loss, (slow_state, _, info)), grads = value_and_grad(
+        batched_outer_loop_ins, 0, has_aux=True
+    )(
+        slow_params,
+        fast_params,
+        slow_state,
+        fast_state,
+        inner_opt_state,
+        split(rng, x_spt.shape[0]),
+        x_spt,
+        y_spt,
+        x_qry,
+        y_qry,
+    )
+    updates, outer_opt_state = outer_opt_update(
+        grads, outer_opt_state, slow_params,
+    )
+    slow_params = ox.apply_updates(slow_params, updates)
 
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
@@ -164,7 +221,13 @@ if __name__ == "__main__":
     )
 
     # Model
-    body, head = prepare_model(cfg.dataset, cfg.way, cfg.hidden_size, cfg.activation)
+    if cfg.train_method == "fsl":
+        output_size = cfg.way
+    elif (cfg.train_method == "fsl-reset"):
+        output_size = sup_train_images.shape[0]
+    body, head = prepare_model(
+        cfg.dataset, output_size, cfg.hidden_size, cfg.activation
+    )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
         rng, cfg.dataset, body.init, body.apply, head.init, device,
@@ -176,7 +239,10 @@ if __name__ == "__main__":
     outer_opt = ox.chain(
         ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(lr_schedule),
     )
-    outer_opt_state = outer_opt.init((slow_params, fast_params))
+    if cfg.train_method == "fsl":
+        outer_opt_state = outer_opt.init((slow_params, fast_params))
+    elif cfg.train_method == "fsl-reset":
+        outer_opt_state = outer_opt.init(slow_params)
 
     # Train data sampling
     train_sample_fn_kwargs = {
@@ -188,6 +254,7 @@ if __name__ == "__main__":
         "qry_shot": cfg.qry_shot,
         "preprocess_fn": preprocess_fn,
         "device": device,
+        "shuffled_labels": cfg.train_method == "fsl",
     }
     train_sample_fn = partial(fsl_sample_transfer_build, **train_sample_fn_kwargs,)
     # Train loops
@@ -211,12 +278,17 @@ if __name__ == "__main__":
     train_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=train_outer_loop_ins
     )
+    if cfg.train_method == "fsl":
+        step_ins = step
+    elif cfg.train_method == "fsl-reset":
+        step_ins = step_reset
     step_ins = jit(
         partial(
-            step,
+            step_ins,
             inner_opt_init=inner_opt.init,
             outer_opt_update=outer_opt.update,
             batched_outer_loop_ins=train_batched_outer_loop_ins,
+            train_method=cfg.train_method,
         ),
     )
     # Val data sampling
