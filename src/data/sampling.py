@@ -2,6 +2,7 @@ import numpy as onp
 import jax
 from jax.random import split
 from jax import numpy as jnp, random
+from lib import flatten
 
 
 def shuffle_along_axis(rng, a, axis):
@@ -9,7 +10,7 @@ def shuffle_along_axis(rng, a, axis):
     return jnp.take_along_axis(a, idx, axis=axis)
 
 
-def fsl_sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
+def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
     rng_classes, rng_idxs = split(rng)
     if not disjoint:
         # For each task take way classes
@@ -57,7 +58,7 @@ def fsl_sample(
     disjoint=True,
     shuffled_labels=True,
 ):
-    sampled_images, sampled_labels = fsl_sample_tasks(
+    sampled_images, sampled_labels = sample_tasks(
         rng,
         images,
         labels,
@@ -89,6 +90,7 @@ def fsl_sample_transfer_build(
     device=None,
     disjoint=False,
     shuffled_labels=True,
+    stratified=None,  # For compatibility
 ):
     x, y = fsl_sample(
         rng, images, labels, batch_size, way, shot, qry_shot, disjoint, shuffled_labels,
@@ -103,6 +105,69 @@ def fsl_sample_transfer_build(
     y_spt, y_qry = jnp.split(y, (shot,), 2)
     y_spt = y_spt.reshape(batch_size, way * shot)
     y_qry = y_qry.reshape(batch_size, way * qry_shot)
+    return x_spt, y_spt, x_qry, y_qry
+
+
+def continual_learning_sample(
+    rng, images, labels, num_tasks, way, shot, qry_shot, stratified=True, disjoint=True
+):
+    rng_spt, rng_qry = split(rng)
+    x_spt, y_spt = sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint)
+
+    if stratified:
+        x_qry, y_qry = sample_tasks(
+            rng,
+            images,
+            labels,
+            num_tasks,
+            min(qry_shot, images.shape[0]),
+            max(1, qry_shot // images.shape[0]),
+            disjoint,
+        )
+        x_qry = flatten(x_qry, (1, 2))
+        y_qry = flatten(y_qry, (1, 2))
+    else:
+        idxs = shuffle_along_axis(
+            rng_qry,
+            jnp.arange(images.shape[0] * images.shape[1])[None, :].repeat(num_tasks, 0),
+            1,
+        )[:, :qry_shot]
+
+        x_qry = images[idxs // images.shape[1], idxs % images.shape[1]]
+        y_qry = labels[idxs // images.shape[1], idxs % images.shape[1]]
+
+    return x_spt, y_spt, x_qry, y_qry
+
+
+def continual_learning_sample_build_transfer(
+    rng,
+    images,
+    labels,
+    batch_size,
+    way,
+    shot,
+    qry_shot,
+    preprocess_fn,
+    device,
+    stratified=True,
+    disjoint=False,
+    shuffled_labels=None,  # Compatibility
+):
+    x_spt, y_spt, x_qry, y_qry = continual_learning_sample(
+        rng, images, labels, batch_size, way, shot, qry_shot, stratified, disjoint,
+    )
+
+    image_shape = x_spt.shape[-3:]
+    x_spt = x_spt.reshape(batch_size, way * shot, *image_shape)
+    y_spt = y_spt.reshape(batch_size, way * shot)
+
+    x_spt = preprocess_fn(jax.device_put(x_spt, device))
+    y_spt = jax.device_put(y_spt, device)
+    x_qry = preprocess_fn(jax.device_put(x_qry, device))
+    y_qry = jax.device_put(y_qry, device)
+    x_qry = jnp.concatenate((x_spt, x_qry), 1)
+    y_qry = jnp.concatenate((y_spt, y_qry), 1)
+
     return x_spt, y_spt, x_qry, y_qry
 
 

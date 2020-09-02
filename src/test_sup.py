@@ -8,19 +8,22 @@ def forward_loader(pred_fn, loader, device, is_norm=False, preprocess_fn=None):
     all_preds = []
     all_targets = []
     for X, y in loader:
+        X = jax.device_put(X, device)
         if preprocess_fn:
             X = preprocess_fn(X)
-        X = jax.device_put(X, device)
         preds = pred_fn(X)
         if is_norm:
             preds = normalize(preds.reshape(preds.shape[0], -1))
-        all_preds.append(onp.array(preds))
+        all_preds.append(jax.tree_map(onp.array, preds))
         all_targets.append(onp.array(y))
     return onp.concatenate(all_preds), onp.concatenate(all_targets)
 
 
-def test_sup(pred_fn, data_loader, device):
-    all_preds, all_targets = forward_loader(pred_fn, data_loader, device)
+def test_sup(pred_fn, data_loader, device, preprocess_fn=None):
+    all_preds, all_targets = forward_loader(
+        pred_fn, data_loader, device, preprocess_fn=preprocess_fn,
+    )
+    all_preds = all_preds.argmax(-1)
     # all_preds = onp.concatenate(all_preds)
     # all_targets = onp.concatenate(all_targets)
 
@@ -41,8 +44,12 @@ def test_sup_lr(pred_fn, spt_loader, qry_loader, is_norm, device, n_jobs=4):
 
 
 def test_sup_cosine(pred_fn, spt_loader, qry_loader, device, preprocess_fn=None):
-    spt_preds, spt_targets = forward_loader(pred_fn, spt_loader, device, True, preprocess_fn)
-    qry_preds, qry_targets = forward_loader(pred_fn, qry_loader, device, True, preprocess_fn)
+    spt_preds, spt_targets = forward_loader(
+        pred_fn, spt_loader, device, True, preprocess_fn
+    )
+    qry_preds, qry_targets = forward_loader(
+        pred_fn, qry_loader, device, True, preprocess_fn
+    )
 
     cosine_distance = spt_preds @ qry_preds.transpose()
     max_idx = onp.argmax(cosine_distance, axis=0)

@@ -89,6 +89,32 @@ def mean_xe_and_acc_dict(logits, targets):
     return loss, {"acc": acc}
 
 
+def apply_and_loss_fn(
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    rng,
+    inputs,
+    targets,
+    is_training,
+    slow_apply,
+    fast_apply,
+    loss_fn,
+):
+    slow_rng, fast_rng = split(rng)
+
+    slow_outputs, slow_state = slow_apply(
+        slow_params, slow_state, slow_rng, inputs, is_training,
+    )
+    fast_outputs, fast_state = fast_apply(
+        fast_params, fast_state, fast_rng, *slow_outputs, is_training
+    )
+    loss, *aux = loss_fn(fast_outputs, targets)
+
+    return loss, ((slow_state, fast_state), aux)
+
+
 def fast_apply_and_loss_fn(
     fast_params,
     fast_state,
@@ -267,6 +293,88 @@ def fsl_inner_loop(
         info = {
             "losses": jnp.stack(losses),
             "auxs": tree_multimap(lambda x, *xs: jnp.stack(xs), auxs[0], *auxs),
+        }
+    else:
+        info = (
+            {
+                "losses": {"initial": initial_loss, "final": final_loss},
+                "auxs": {"initial": initial_aux, "final": final_aux},
+            },
+        )
+
+    return (
+        fast_params,
+        slow_state,
+        fast_state,
+        opt_state,
+        info,
+    )
+
+
+def cl_inner_loop(
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    opt_state,
+    rng,
+    inputs,
+    targets,
+    is_training,
+    slow_apply,
+    fast_apply,
+    loss_fn,
+    opt_update_fn,
+    num_steps=None,
+    update_state=False,
+    return_history=True,
+):
+    _fast_apply_and_loss_fn = partial(
+        fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
+    )
+    rng_slow, rng_fast, *rngs = split(rng, inputs.shape[0] + 2)
+    slow_outputs, slow_state = slow_apply(
+        slow_params, slow_state, rng_slow, inputs, is_training,
+    )
+
+    initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
+        fast_params, fast_state, rng_fast, slow_outputs, is_training, targets,
+    )
+
+    losses = []
+    auxs = []
+
+    for i in range(inputs.shape[0]):
+        (loss, (new_fast_state, *aux)), grads = value_and_grad(
+            _fast_apply_and_loss_fn, has_aux=True
+        )(
+            fast_params,
+            fast_state,
+            rngs[i],
+            [so[[i]] for so in slow_outputs],
+            is_training,
+            targets[[i]],
+        )
+        if update_state:
+            fast_state = new_fast_state
+        if return_history:
+            losses.append(loss)
+            auxs.append(aux)
+
+        updates, opt_state = opt_update_fn(grads, opt_state, fast_params)
+        fast_params = ox.apply_updates(fast_params, updates)
+
+    final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
+        fast_params, fast_state, rng_fast, slow_outputs, is_training, targets,
+    )
+    if return_history:
+        # losses.append(final_loss)
+        # auxs.append(final_aux)
+        info = {
+            "losses": jnp.stack(losses),
+            "auxs": tree_multimap(lambda x, *xs: jnp.stack(xs), auxs[0], *auxs),
+            "initial": {"loss": initial_loss, "aux": initial_aux},
+            "final": {"loss": final_loss, "aux": final_aux},
         }
     else:
         info = (
