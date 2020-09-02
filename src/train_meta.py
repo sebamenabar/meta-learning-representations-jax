@@ -62,6 +62,13 @@ def parse_args(parser=None):
     parser.add_argument(
         "--qry_shot", type=int, help="Number of quried samples per class", default=10,
     )
+    parser.add_argument(
+        "--test_qry_shot",
+        type=int,
+        help="Number of quried samples per class",
+        default=15,
+    )
+    parser.add_argument("--stratified_qry", default=False, action="store_true")
 
     # Optimization arguments
     parser.add_argument(
@@ -219,6 +226,13 @@ if __name__ == "__main__":
     # These are for supervised learning validation
     sup_val_images = train_images[:, TRAIN_SIZE:]
     sup_val_labels = train_labels[:, TRAIN_SIZE:]
+
+    transfer_spt_images = val_images[:, :TRAIN_SIZE]
+    transfer_spt_labels = val_labels[:, :TRAIN_SIZE]
+    transfer_qry_images = val_images[:, TRAIN_SIZE:]
+    transfer_qry_labels = val_labels[:, TRAIN_SIZE:]
+
+    exp.log("Supervised train data:", sup_train_images.shape, sup_train_labels.shape)
     exp.log(
         "Supervised validation data:", sup_val_images.shape, sup_val_labels.shape,
     )
@@ -229,7 +243,7 @@ if __name__ == "__main__":
     # Model
     if cfg.train_method == "fsl":
         output_size = cfg.way
-    elif (cfg.train_method == "fsl-reset") or (
+    elif (cfg.train_method == "fsl-reset-zero") or (
         cfg.train_method == "fsl-reset-per-task"
     ):
         output_size = sup_train_images.shape[0]
@@ -238,7 +252,7 @@ if __name__ == "__main__":
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng, cfg.dataset, body.init, body.apply, head.init, device,
+        rng_params, cfg.dataset, body.init, body.apply, head.init, device,
     )
 
     # Optimizers
@@ -289,7 +303,7 @@ if __name__ == "__main__":
     )
     if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
         step_ins = step
-    elif cfg.train_method == "fsl-reset":
+    elif cfg.train_method == "fsl-reset-zero":
         step_ins = step_reset
     step_ins = jit(
         partial(
@@ -307,29 +321,46 @@ if __name__ == "__main__":
         "batch_size": cfg.meta_batch_size_test,
         "way": cfg.way,
         "shot": cfg.shot,
-        "qry_shot": 15,  # Standard
+        "qry_shot": cfg.test_qry_shot,  # 15 is standard
         "preprocess_fn": preprocess_fn,
         "device": device,
     }
     test_fsl_sample_fn = partial(
         fsl_sample_transfer_build, **test_fsl_sample_fn_kwargs,
     )
-    test_sup_spt_sampler = BatchSampler(
-        rng,
-        flatten(sup_train_images, 1),
-        flatten(sup_train_labels),
-        cfg.sup_batch_size_test,
-        shuffle=False,
-        keep_last=True,
-    )
-    test_sup_qry_sampler = BatchSampler(
-        rng,
-        flatten(sup_val_images, 1),
-        flatten(sup_val_labels),
-        cfg.sup_batch_size_test,
-        shuffle=False,
-        keep_last=True,
-    )
+    # rng, *rngs_samplers = split(rng, 5)
+    # test_sup_spt_sampler = BatchSampler(
+    #     rngs_samplers[0],
+    #     flatten(sup_train_images, 1),
+    #     flatten(sup_train_labels),
+    #     cfg.sup_batch_size_test,
+    #     shuffle=True, # For batch statistics is better to shuffle
+    #     keep_last=True,
+    # )
+    # test_sup_qry_sampler = BatchSampler(
+    #     rngs_samplers[1],
+    #     flatten(sup_val_images, 1),
+    #     flatten(sup_val_labels),
+    #     cfg.sup_batch_size_test,
+    #     shuffle=True,
+    #     keep_last=True,
+    # )
+    # test_transfer_spt_sampler = BatchSampler(
+    #     rngs_samplers[2],
+    #     flatten(transfer_spt_images, 1),
+    #     flatten(transfer_spt_labels),
+    #     cfg.sup_batch_size_test,
+    #     shuffle=True,
+    #     keep_last=True,
+    # )
+    # test_transfer_qry_sampler = BatchSampler(
+    #     rngs_samplers[3],
+    #     flatten(transfer_qry_images, 1),
+    #     flatten(transfer_qry_labels),
+    #     cfg.sup_batch_size_test,
+    #     shuffle=True,
+    #     keep_last=True,
+    # )
     # Val loops
     test_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -353,10 +384,10 @@ if __name__ == "__main__":
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     # Test embeddings
-    embeddings_fn = lambda slow_params, slow_state, inputs: body.apply(
-        slow_params, slow_state, None, inputs, False
-    )[0][0]
-    embeddings_fn = jit(embeddings_fn)
+    # embeddings_fn = lambda slow_params, slow_state, inputs: body.apply(
+    #     slow_params, slow_state, None, inputs, False
+    # )[0][0]
+    # embeddings_fn = jit(embeddings_fn)
     ##
 
     pbar = tqdm(
@@ -366,6 +397,7 @@ if __name__ == "__main__":
         mininterval=10,
         maxinterval=30,
     )
+    best_val_acc = 0.0
     for i in pbar:
         rng, rng_step, rng_sample = split(rng, 3)
         x_spt, y_spt, x_qry, y_qry = train_sample_fn(rng_sample)
@@ -393,11 +425,11 @@ if __name__ == "__main__":
             spt_classes,
         )
 
-        if (i == 0) or (((i + 1) % cfg.val_every_k_steps) == 0):
+        if (i == 0) or (((i + 1) % cfg.val_interval) == 0):
             now = time.time()
             rng, rng_test = split(rng)
             fsl_maml_results = test_fsl_maml(
-                rng,
+                rng_test,
                 slow_params,
                 fast_params,
                 slow_state,
@@ -410,45 +442,79 @@ if __name__ == "__main__":
             fsl_maml_loss = fsl_maml_results[0].mean()
             fsl_maml_acc = fsl_maml_results[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
-            fsl_embeddings_preds, fsl_embeddings_targets = test_fsl_embeddings(
-                rng_test,
-                partial(embeddings_fn, slow_params, slow_state),
-                test_fsl_sample_fn,
-                cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
-                device=device,
-                pool=cfg.pool,
-            )
-            fsl_embeddings_acc = (
-                (fsl_embeddings_preds == fsl_embeddings_targets)
-                .astype(onp.float)
-                .mean()
-            )
+            exp.log(f"\nValidation step {i} results:")
+            exp.log(f"FSL acc: {fsl_maml_acc}, loss: {fsl_maml_loss}")
 
-            sup_preds, sup_targets = test_sup_cosine(
-                partial(embeddings_fn, slow_params, slow_state),
-                test_sup_spt_sampler,
-                test_sup_qry_sampler,
-                device,
-                preprocess_fn,
-            )
-            sup_acc = (sup_preds == sup_targets).astype(onp.float).mean()
+            if fsl_maml_acc > best_val_acc:
+                best_val_acc = fsl_maml_acc
+                exp.log(f"\  New best validation accuracy: {best_val_acc}")
+                exp.log("Saving checkpoint\n")
+                with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
+                    dill.dump(
+                        {
+                            "val_acc": best_val_acc,
+                            "val_loss": fsl_maml_loss,
+                            "optimizer_state": outer_opt_state,
+                            "slow_params": slow_params,
+                            "fast_params": fast_params,
+                            "slow_state": slow_state,
+                            "fast_state": fast_state,
+                            "rng": rng,
+                            "i": i,
+                        },
+                        f,
+                        protocol=3,
+                    )
 
-            test_time = time.time() - now
+            # fsl_embeddings_preds, fsl_embeddings_targets = test_fsl_embeddings(
+            #     rng_test,
+            #     partial(embeddings_fn, slow_params, slow_state),
+            #     test_fsl_sample_fn,
+            #     cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
+            #     device=device,
+            #     pool=cfg.pool,
+            # )
+            # fsl_embeddings_acc = (
+            #     (fsl_embeddings_preds == fsl_embeddings_targets)
+            #     .astype(onp.float)
+            #     .mean()
+            # )
+
+            # sup_preds, sup_targets = test_sup_cosine(
+            #     partial(embeddings_fn, slow_params, slow_state),
+            #     test_sup_spt_sampler,
+            #     test_sup_qry_sampler,
+            #     device,
+            #     preprocess_fn,
+            # )
+            # sup_acc = (sup_preds == sup_targets).astype(onp.float).mean()
+
+            # transfer_preds, transfer_targets = test_sup_cosine(
+            #     partial(embeddings_fn, slow_params, slow_state),
+            #     test_transfer_spt_sampler,
+            #     test_transfer_qry_sampler,
+            #     device,
+            #     preprocess_fn,
+            # )
+            # transfer_acc = (transfer_preds == transfer_targets).astype(onp.float).mean()
+
+            # test_time = time.time() - now
 
         if (
             (i == 0)
             or (((i + 1) % cfg.progress_bar_refresh_rate) == 0)
-            or (((i + 1) % cfg.val_every_k_steps) == 0)
+            or (((i + 1) % cfg.val_interval) == 0)
         ):
             current_lr = lr_schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
-                ttime=f"{test_time:.1f}",
+                # ttime=f"{test_time:.1f}",
                 loss=f"{info['outer']['final']['loss'].mean():.2f}",
                 foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.2f}",
                 vam=f"{fsl_maml_acc:.2f}",
-                vae=f"{fsl_embeddings_acc:.2f}",
-                vas=f"{sup_acc:.2f}",
+                # vae=f"{fsl_embeddings_acc:.2f}",
+                # vas=f"{sup_acc:.2f}",
+                # vat=f"{transfer_acc:.2f}",
                 # vfol=f"{vfol:.3f}",
                 # vioa=f"{vioa:.3f}",
                 # vfoa=f"{vfoa:.3f}",
