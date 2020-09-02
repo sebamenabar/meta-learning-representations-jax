@@ -90,7 +90,7 @@ class Experiment:
 
         parser.add_argument("--seed", type=int, default=0)
         parser.add_argument("--debug", action="store_true", default=False)
-        parser.add_argument("--val_every_k_steps", type=int, default=500)
+        parser.add_argument("--val_interval", type=int, default=500)
         parser.add_argument("--disable_jit", action="store_true", default=False)
         parser.add_argument("--progress_bar_refresh_rate", type=int, default=50)
         # Device settings
