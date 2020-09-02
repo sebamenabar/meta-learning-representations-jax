@@ -11,7 +11,7 @@ def miniimagenet_cnn_argparse(parser=None):
     if parser is None:
         parser = ArgumentParser()
     parser.add_argument("--hidden_size", default=32, type=int)
-    parser.add_argument("--track_bn_stats", default=False, action="store_true")
+    # parser.add_argument("--track_bn_stats", default=False, action="store_true")
     parser.add_argument(
         "--activation", type=str, default="relu", choices=list(activations.keys())
     )
@@ -62,7 +62,7 @@ class ConvBlock(hk.Module):
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.0,  # 0 for no tracking of stats
+                decay_rate=0.95 if self.track_stats else 0.0,  # 0 for no tracking of stats
             )(
                 x,
                 is_training=self.track_stats and is_training,
