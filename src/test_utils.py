@@ -136,13 +136,14 @@ def lr_fit_eval(X, y, X_test, n_jobs=1, predict_train=False):
     return query_y_pred
 
 
-def forward_loader(pred_fn, loader, device, is_norm=False, preprocess_fn=None):
+def forward_loader(pred_fn, loader, device, is_norm=False, normalize_fn=None):
     all_preds = []
     all_targets = []
     for X, y in loader:
         X = jax.device_put(X, device)
-        if preprocess_fn:
-            X = preprocess_fn(X)
+        X = X / 255
+        if normalize_fn:
+            X = normalize_fn(X)
         preds = pred_fn(X)
         if is_norm:
             preds = normalize(preds.reshape(preds.shape[0], -1))
@@ -253,33 +254,23 @@ class SupervisedStandardTester:
         test_images,
         test_labels,
         batch_size,
-        # forward_fn,
-        preprocess_fn=None,
+        normalize_fn=None,
         device=None,
     ):
         self.test_images = test_images
         self.test_images = test_labels
-        # self.forward_fn = forward_fn
         self.loader = BatchSampler(
-            rng, test_images, test_labels, batch_size, True, True
+            rng, test_images, test_labels, batch_size, True, True,
         )
-        self.preprocess_fn = preprocess_fn
+        self.normalize_fn = normalize_fn
         self.device = device
 
     def __call__(
         self,
         forward_fn,
-        # slow_params,
-        # fast_params,
-        # slow_state,
-        # fast_state,
-        # rng,
     ):
-        # forward_fn = partial(
-        #     forward_fn, slow_params, fast_params, slow_state, fast_state, rng,
-        # )
         preds, targets = forward_loader(
-            forward_fn, self.loader, self.device, preprocess_fn=self.preprocess_fn,
+            forward_fn, self.loader, self.device, normalize_fn=self.normalize_fn,
         )
         loss, acc = xe_and_acc(preds, targets)
 

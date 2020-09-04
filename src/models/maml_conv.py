@@ -29,6 +29,7 @@ class ConvBlock(hk.Module):
         normalize=True,
         name=None,
         track_stats=False,
+        initializer="glorot_uniform",
     ):
         super().__init__(name=name)
         self.output_channels = output_channels
@@ -48,6 +49,14 @@ class ConvBlock(hk.Module):
             self.conv_stride = self.stride[:2]
         # self.conv_stride = (1, 1)
         self.track_stats = track_stats
+        if initializer == "glorot_uniform":
+            self.initializer = hk.initializers.VarianceScaling(
+                1.0, "fan_avg", "uniform"
+            )
+        elif initializer == "kaiming_normal":
+            self.initializer = hk.initializers.VarianceScaling(
+                2.0, "fan_out", "truncated_normal"
+            )
 
     def __call__(self, x, is_training):
         x = hk.Conv2D(
@@ -55,14 +64,16 @@ class ConvBlock(hk.Module):
             kernel_shape=self.kernel_size,
             stride=self.conv_stride,
             padding="SAME",
-            w_init=hk.initializers.VarianceScaling(1.0, "fan_avg", "uniform"),
+            w_init=self.initializer,
             b_init=hk.initializers.Constant(0.0),
         )(x)
         if self.normalize:
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.95 if self.track_stats else 0.0,  # 0 for no tracking of stats
+                decay_rate=0.9
+                if self.track_stats
+                else 0.0,  # 0 for no tracking of stats
             )(
                 x,
                 is_training=self.track_stats and is_training,
@@ -87,6 +98,7 @@ class ConvBase(hk.Module):
         normalize=True,
         track_stats=False,
         name=None,
+        initializer=None,
     ):
         super().__init__(name=name)
         self.output_channels = output_channels
@@ -96,6 +108,7 @@ class ConvBase(hk.Module):
         self.activation = activation
         self.normalize = normalize
         self.track_stats = track_stats
+        self.initializer = initializer
 
     def __call__(self, x, is_training):
         for _ in range(self.layers):
@@ -107,6 +120,7 @@ class ConvBase(hk.Module):
                 activation=self.activation,
                 normalize=self.normalize,
                 track_stats=self.track_stats,
+                initializer=self.initializer,
             )(x, is_training)
         return x
 
@@ -122,6 +136,7 @@ class MiniImagenetCNNBody(hk.Module):
         name=None,
         max_pool=True,
         track_stats=False,
+        initializer=None,
     ):
         super().__init__(name=name)
         self.layers = layers
@@ -130,6 +145,7 @@ class MiniImagenetCNNBody(hk.Module):
         self.normalize = normalize
         self.max_pool = max_pool
         self.track_stats = track_stats
+        self.initializer = initializer
 
     def __call__(self, x, is_training):
         x = ConvBase(
@@ -138,25 +154,45 @@ class MiniImagenetCNNBody(hk.Module):
             layers=self.layers,
             max_pool_factor=4 // self.layers,
             track_stats=self.track_stats,
+            initializer=self.initializer,
         )(x, is_training)
         return (x,)
 
 
 class MiniImagenetCNNHead(hk.Module):
     def __init__(
-        self, output_size, spatial_dims=25, hidden_size=32, name=None,
+        self,
+        output_size,
+        spatial_dims=25,
+        hidden_size=32,
+        name=None,
+        avg_pool=False,
+        initializer="glorot_uniform",
     ):
         super().__init__(name=name)
         self.output_size = output_size
         self.hidden_size = hidden_size
         self.spatial_dims = spatial_dims
+        self.avg_pool = avg_pool
+        if initializer == "glorot_uniform":
+            self.initializer = hk.initializers.VarianceScaling(
+                1.0, "fan_avg", "uniform"
+            )
+        elif initializer == "kaiming_normal":
+            self.initializer = hk.initializers.VarianceScaling(
+                2.0, "fan_out", "truncated_normal"
+            )
 
     def __call__(self, x, is_training):
-        x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
+        if self.avg_pool:
+            x = hk.avg_pool(x, (1, 5, 5, 1), 1, padding="VALID", channel_axis=3)
+            x = hk.Reshape((self.hidden_size,))(x)
+        else:
+            x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
         x = hk.Linear(
             self.output_size,
-            with_bias=False,
-            w_init=hk.initializers.VarianceScaling(1.0, "fan_avg", "uniform"),
+            with_bias=True,
+            w_init=self.initializer,
             b_init=hk.initializers.Constant(0.0),
         )(x)
         return x
@@ -167,6 +203,8 @@ def make_miniimagenet_cnn(
     hidden_size,
     spatial_dims,
     max_pool,
+    initializer,
+    avg_pool=False,
     activation="relu",
     track_stats=False,
 ):
@@ -176,13 +214,18 @@ def make_miniimagenet_cnn(
             max_pool=max_pool,
             activation=activation,
             track_stats=track_stats,
+            initializer=initializer,
         )(
             x, is_training,
         )
     )
     MiniImagenetCNNHead_t = hk.transform_with_state(
         lambda x, is_training: MiniImagenetCNNHead(
-            output_size=output_size, hidden_size=hidden_size, spatial_dims=spatial_dims
+            output_size=output_size,
+            hidden_size=hidden_size,
+            spatial_dims=spatial_dims,
+            initializer=initializer,
+            avg_pool=avg_pool,
         )(
             x, is_training,
         )
@@ -192,6 +235,7 @@ def make_miniimagenet_cnn(
         MiniImagenetCNNBody_t,
         MiniImagenetCNNHead_t,
     )
+
 
 def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
     slow_rng, fast_rng = split(rng)
@@ -210,7 +254,16 @@ def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
 
     return slow_params, fast_params, slow_state, fast_state
 
-def prepare_model(dataset, way, hidden_size, activation, track_stats=False):
+
+def prepare_model(
+    dataset,
+    output_size,
+    hidden_size,
+    activation,
+    initializer,
+    avg_pool=False,
+    track_stats=False,
+):
     if dataset == "miniimagenet":
         max_pool = True
         spatial_dims = 25
@@ -219,12 +272,13 @@ def prepare_model(dataset, way, hidden_size, activation, track_stats=False):
         spatial_dims = 4
 
     return make_miniimagenet_cnn(
-        output_size=way,
+        output_size=output_size,
         hidden_size=hidden_size,
         spatial_dims=spatial_dims,
         max_pool=max_pool,
         activation=activation,
         track_stats=track_stats,
+        initializer=initializer,
+        avg_pool=avg_pool,
     )
-
 

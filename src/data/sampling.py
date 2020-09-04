@@ -95,7 +95,9 @@ def fsl_sample_transfer_build(
     x, y = fsl_sample(
         rng, images, labels, batch_size, way, shot, qry_shot, disjoint, shuffled_labels,
     )
-    x = preprocess_fn(jax.device_put(x, device))
+    x = jax.device_put(x, device)
+    x = x / 255
+    x = preprocess_fn(x)
     y = jax.device_put(y, device)
 
     image_shape = x.shape[-3:]
@@ -205,7 +207,7 @@ class BatchSampler:
         return self
 
     def __next__(self):
-        if self.n + self.batch_size < len(self.X):
+        if self.n + self.batch_size <= len(self.X):
             idxs = self.order[self.n : self.n + self.batch_size]
             self.n += self.batch_size
             return self.X[idxs], self.y[idxs]
