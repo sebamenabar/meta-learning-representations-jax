@@ -250,6 +250,9 @@ if __name__ == "__main__":
     curr_step = 0
     best_sup_val_acc = 0
     for epoch in range(1, cfg.epochs + 1):
+        schedule_state = ox.ScaleByScheduleState(
+            count=schedule_state.count + 1,
+        )  # Unsafe for max int
         # sampler = batch_sampler(rng, train_images, train_labels, cfg.batch_size)
         pbar.set_description(f"E:{epoch}")
         for j, (X, y) in enumerate(train_sampler):
@@ -341,9 +344,6 @@ if __name__ == "__main__":
 
             pbar.update()
 
-        schedule_state = ox.ScaleByScheduleState(
-            count=schedule_state.count + 1,
-        )  # Unsafe for max int
 
     with open(osp.join(exp.exp_dir, "checkpoints/last.ckpt"), "wb") as f:
         dill.dump(
