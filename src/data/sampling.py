@@ -78,6 +78,19 @@ def fsl_sample(
     return sampled_images, labels
 
 
+def fsl_build(
+    images, labels, batch_size, way, shot, qry_shot,
+):
+    image_shape = images.shape[-3:]
+    x_spt, x_qry = jnp.split(images, (shot,), 2)
+    x_spt = x_spt.reshape(batch_size, way * shot, *image_shape)
+    x_qry = x_qry.reshape(batch_size, way * qry_shot, *image_shape)
+    y_spt, y_qry = jnp.split(labels, (shot,), 2)
+    y_spt = y_spt.reshape(batch_size, way * shot)
+    y_qry = y_qry.reshape(batch_size, way * qry_shot)
+    return x_spt, y_spt, x_qry, y_qry
+
+
 def fsl_sample_transfer_build(
     rng,
     images,
