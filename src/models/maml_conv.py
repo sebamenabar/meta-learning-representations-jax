@@ -57,6 +57,8 @@ class ConvBlock(hk.Module):
             self.initializer = hk.initializers.VarianceScaling(
                 2.0, "fan_out", "truncated_normal"
             )
+        else:
+            raise NameError(f"Unknown initializer {initializer}")
 
     def __call__(self, x, is_training):
         x = hk.Conv2D(
@@ -168,8 +170,10 @@ class MiniImagenetCNNHead(hk.Module):
         name=None,
         avg_pool=False,
         initializer="glorot_uniform",
+        head_bias=True,
     ):
         super().__init__(name=name)
+        self.head_bias = head_bias
         self.output_size = output_size
         self.hidden_size = hidden_size
         self.spatial_dims = spatial_dims
@@ -191,7 +195,7 @@ class MiniImagenetCNNHead(hk.Module):
             x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
         x = hk.Linear(
             self.output_size,
-            with_bias=True,
+            with_bias=self.head_bias,
             w_init=self.initializer,
             b_init=hk.initializers.Constant(0.0),
         )(x)
@@ -207,6 +211,7 @@ def make_miniimagenet_cnn(
     avg_pool=False,
     activation="relu",
     track_stats=False,
+    head_bias=True,
 ):
     MiniImagenetCNNBody_t = hk.transform_with_state(
         lambda x, is_training: MiniImagenetCNNBody(
@@ -226,6 +231,7 @@ def make_miniimagenet_cnn(
             spatial_dims=spatial_dims,
             initializer=initializer,
             avg_pool=avg_pool,
+            head_bias=head_bias,
         )(
             x, is_training,
         )
@@ -263,6 +269,7 @@ def prepare_model(
     initializer,
     avg_pool=False,
     track_stats=False,
+    head_bias=True,
 ):
     if dataset == "miniimagenet":
         max_pool = True
@@ -280,5 +287,6 @@ def prepare_model(
         track_stats=track_stats,
         initializer=initializer,
         avg_pool=avg_pool,
+        head_bias=head_bias,
     )
 
