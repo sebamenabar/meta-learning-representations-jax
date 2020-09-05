@@ -6,6 +6,7 @@ import dill
 import time
 from tqdm import tqdm
 from argparse import ArgumentParser
+from easydict import EasyDict as edict
 
 import numpy as onp
 
@@ -24,6 +25,7 @@ from jax import (
 import optax as ox
 import haiku as hk
 
+from config import rsetattr
 from lib import (
     flatten,
     outer_loop,
@@ -34,9 +36,9 @@ from lib import (
     mean_xe_and_acc_dict,
     # outer_loop_reset_per_task,
 )
-from data import prepare_data
+from data import prepare_data, augment
 from experiment import Experiment, Logger
-from data.sampling import fsl_sample_transfer_build, BatchSampler
+from data.sampling import fsl_sample, fsl_build, BatchSampler
 from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
 from test_utils import test_fsl_maml, test_fsl_embeddings
 from test_sup import test_sup_cosine
@@ -48,13 +50,10 @@ def parse_args(parser=None):
     parser = Experiment.add_args(parser)
     parser = miniimagenet_cnn_argparse(parser)
     # Training arguments
+    parser.add_argument("--batch_size", help="Number of FSL tasks", default=4, type=int)
     parser.add_argument(
-        "--meta_batch_size", help="Number of FSL tasks", default=20, type=int
+        "--val.batch_size", help="Number of FSL tasks", default=25, type=int
     )
-    parser.add_argument(
-        "--meta_batch_size_test", help="Number of FSL tasks", default=25, type=int
-    )
-    parser.add_argument("--sup_batch_size_test", default=512, type=int)
     parser.add_argument("--way", help="Number of classes per task", default=5, type=int)
     parser.add_argument(
         "--shot", help="Number of samples per class", default=5, type=int
@@ -63,12 +62,14 @@ def parse_args(parser=None):
         "--qry_shot", type=int, help="Number of quried samples per class", default=10,
     )
     parser.add_argument(
-        "--test_qry_shot",
+        "--val.qry_shot",
         type=int,
         help="Number of quried samples per class",
         default=15,
     )
-    parser.add_argument("--stratified_qry", default=False, action="store_true")
+    parser.add_argument("--lr_schedule", nargs="*", type=int, default=[10000, 25000])
+    parser.add_argument("--cosine", action="store_true", default=False)
+
 
     # Optimization arguments
     parser.add_argument(
@@ -90,9 +91,29 @@ def parse_args(parser=None):
     )
 
     parser.add_argument("--pool", type=int, default=4)
-    parser.add_argument("--fsl_num_tasks_test", type=int, default=500)
+    parser.add_argument("--fsl_num_tasks_test", type=int, default=600)
+    parser.add_argument("--val_interval", type=int, default=2000)
+    parser.add_argument("--no-augment", default=False, action="store_false")
 
-    return parser
+    parser.add_argument("--model.output_size", type=int)
+    parser.add_argument("--model.hidden_size", default=32, type=int)
+    parser.add_argument("--model.activation", default="relu", type=str)
+    parser.add_argument(
+        "--model.initializer",
+        default="glorot_uniform",
+        type=str,
+        choices=["kaiming_normal", "glorot_uniform"],
+    )
+    parser.add_argument("--model.avg_pool", default=False, action="store_true")
+    parser.add_argument("--model.head_bias", default=False, action="store_true")
+    
+
+    args = parser.parse_args()
+    cfg = edict(val=edict(), model=edict())
+    for argname, argval in vars(args).items():
+        rsetattr(cfg, argname, argval)
+
+    return args, cfg
 
 
 def step(
@@ -157,6 +178,7 @@ def step_reset(
     train_method,
 ):
     if train_method == "fsl-reset-zero":
+        print("Reseting head params to zero")
         fast_params = hk.data_structures.merge(
             {
                 "mini_imagenet_cnn_head/linear": {
@@ -193,9 +215,9 @@ def step_reset(
 
 
 if __name__ == "__main__":
-    parser = parse_args()
-    args = parser.parse_args()
-    cfg = parse_and_build_cfg(args)
+    # parser = parse_args()
+    args, cfg = parse_args()
+    # cfg = parse_and_build_cfg(args)
     # The Experiment class creates a directory for the experiment,
     # copies source files and creates configurations files
     # It also creates a logfile.log which can be written to with exp.log
@@ -218,37 +240,39 @@ if __name__ == "__main__":
     exp.log(f"Running on {device} with seed: {cfg.seed}")
 
     # Data
-    train_images, train_labels, val_images, val_labels, preprocess_fn = prepare_data(
-        cfg.dataset, cfg.data_dir, device,
+    train_images, train_labels, normalize_fn = prepare_data(
+        cfg.dataset,
+        osp.join(
+            cfg.data_dir,
+            "miniImageNet_category_split_train_phase_train_ordered.pickle",
+        ),
+        device,
     )
-    sup_train_images = train_images[:, :TRAIN_SIZE]
-    sup_train_labels = train_labels[:, :TRAIN_SIZE]
-    # These are for supervised learning validation
-    sup_val_images = train_images[:, TRAIN_SIZE:]
-    sup_val_labels = train_labels[:, TRAIN_SIZE:]
-
-    transfer_spt_images = val_images[:, :TRAIN_SIZE]
-    transfer_spt_labels = val_labels[:, :TRAIN_SIZE]
-    transfer_qry_images = val_images[:, TRAIN_SIZE:]
-    transfer_qry_labels = val_labels[:, TRAIN_SIZE:]
-
-    exp.log("Supervised train data:", sup_train_images.shape, sup_train_labels.shape)
-    exp.log(
-        "Supervised validation data:", sup_val_images.shape, sup_val_labels.shape,
+    val_images, _val_labels, _ = prepare_data(
+        cfg.dataset,
+        osp.join(cfg.data_dir, "miniImageNet_category_split_val_ordered.pickle",),
+        device,
     )
+    val_labels = (
+        _val_labels - 64
+    )  # make val labels start at 0 (they originally begin are at 64-79)
+
+    exp.log("Train data:", train_images.shape, train_labels.shape)
     exp.log(
-        "FSL and Transfer learning data:", val_images.shape, val_labels.shape,
+        "Validation data:", val_images.shape, val_images.shape,
     )
 
     # Model
-    if cfg.train_method == "fsl":
-        output_size = cfg.way
-    elif (cfg.train_method == "fsl-reset-zero") or (
-        cfg.train_method == "fsl-reset-per-task"
-    ):
-        output_size = sup_train_images.shape[0]
+
     body, head = prepare_model(
-        cfg.dataset, output_size, cfg.hidden_size, cfg.activation
+        cfg.dataset,
+        cfg.model.output_size,
+        cfg.model.hidden_size,
+        cfg.model.activation,
+        track_stats=False,
+        initializer=cfg.model.initializer,
+        avg_pool=cfg.model.avg_pool,
+        head_bias=cfg.model.head_bias,
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
@@ -257,9 +281,14 @@ if __name__ == "__main__":
 
     # Optimizers
     inner_opt = ox.sgd(cfg.inner_lr)
-    lr_schedule = ox.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.1)
+    if cfg.cosine:
+        schedule = ox.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.05)
+    else:
+        schedule = ox.piecewise_constant_schedule(
+            -cfg.outer_lr, {e: 0.1 for e in cfg.lr_schedule}
+        )
     outer_opt = ox.chain(
-        ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(lr_schedule),
+        ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(schedule),
     )
     if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
         outer_opt_state = outer_opt.init((slow_params, fast_params))
@@ -267,18 +296,19 @@ if __name__ == "__main__":
         outer_opt_state = outer_opt.init(slow_params)
 
     # Train data sampling
+
     train_sample_fn_kwargs = {
-        "images": sup_train_images,
-        "labels": sup_train_labels,
-        "batch_size": cfg.meta_batch_size,
+        "images": train_images,
+        "labels": train_labels,
+        "num_tasks": cfg.batch_size,
         "way": cfg.way,
-        "shot": cfg.shot,
+        "spt_shot": cfg.shot,
         "qry_shot": cfg.qry_shot,
-        "preprocess_fn": preprocess_fn,
-        "device": device,
-        "shuffled_labels": cfg.train_method == "fsl",
+        "shuffled_labels": True,
+        "disjoint": False,  # tasks can share classes
     }
-    train_sample_fn = partial(fsl_sample_transfer_build, **train_sample_fn_kwargs,)
+    train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
+
     # Train loops
     train_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -314,53 +344,29 @@ if __name__ == "__main__":
             train_method=cfg.train_method,
         ),
     )
+    augment = jit(augment)
+    fsl_build_ins = jit(
+        partial(
+            fsl_build,
+            batch_size=cfg.batch_size,
+            way=cfg.way,
+            shot=cfg.shot,
+            qry_shot=cfg.qry_shot,
+        )
+    )
     # Val data sampling
-    test_fsl_sample_fn_kwargs = {
+    test_sample_fn_kwargs = {
         "images": val_images,
         "labels": val_labels,
-        "batch_size": cfg.meta_batch_size_test,
+        "num_tasks": cfg.val.batch_size,
         "way": cfg.way,
-        "shot": cfg.shot,
-        "qry_shot": cfg.test_qry_shot,  # 15 is standard
-        "preprocess_fn": preprocess_fn,
-        "device": device,
+        # "spt_shot": 1,
+        "qry_shot": 15,
+        "shuffled_labels": True,
+        "disjoint": False,  # tasks can share classes
     }
-    test_fsl_sample_fn = partial(
-        fsl_sample_transfer_build, **test_fsl_sample_fn_kwargs,
-    )
-    # rng, *rngs_samplers = split(rng, 5)
-    # test_sup_spt_sampler = BatchSampler(
-    #     rngs_samplers[0],
-    #     flatten(sup_train_images, 1),
-    #     flatten(sup_train_labels),
-    #     cfg.sup_batch_size_test,
-    #     shuffle=True, # For batch statistics is better to shuffle
-    #     keep_last=True,
-    # )
-    # test_sup_qry_sampler = BatchSampler(
-    #     rngs_samplers[1],
-    #     flatten(sup_val_images, 1),
-    #     flatten(sup_val_labels),
-    #     cfg.sup_batch_size_test,
-    #     shuffle=True,
-    #     keep_last=True,
-    # )
-    # test_transfer_spt_sampler = BatchSampler(
-    #     rngs_samplers[2],
-    #     flatten(transfer_spt_images, 1),
-    #     flatten(transfer_spt_labels),
-    #     cfg.sup_batch_size_test,
-    #     shuffle=True,
-    #     keep_last=True,
-    # )
-    # test_transfer_qry_sampler = BatchSampler(
-    #     rngs_samplers[3],
-    #     flatten(transfer_qry_images, 1),
-    #     flatten(transfer_qry_labels),
-    #     cfg.sup_batch_size_test,
-    #     shuffle=True,
-    #     keep_last=True,
-    # )
+    test_sample_fn_1 = partial(fsl_sample, spt_shot=1, **test_sample_fn_kwargs,)
+    test_sample_fn_5 = partial(fsl_sample, spt_shot=5, **test_sample_fn_kwargs,)
     # Val loops
     test_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -383,12 +389,24 @@ if __name__ == "__main__":
         batched_outer_loop, outer_loop=test_outer_loop_ins, spt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
-    # Test embeddings
-    # embeddings_fn = lambda slow_params, slow_state, inputs: body.apply(
-    #     slow_params, slow_state, None, inputs, False
-    # )[0][0]
-    # embeddings_fn = jit(embeddings_fn)
-    ##
+    test_fn_ins = partial(
+        test_fsl_maml,
+        inner_opt_init=inner_opt.init,
+        #  sample_fn=test_sample_fn,
+        batched_outer_loop=test_batched_outer_loop_ins,
+        normalize_fn=normalize_fn,
+        # build_fn=jit(
+        #     partial(
+        #         fsl_build,
+        #         batch_size=cfg.val.batch_size,
+        #         way=cfg.way,
+        #         shot=shot,
+        #         qry_shot=15,
+        #     )
+        # ),
+        augment_fn=augment,
+        device=device,
+    )
 
     pbar = tqdm(
         range(cfg.num_outer_steps),
@@ -399,10 +417,16 @@ if __name__ == "__main__":
     )
     best_val_acc = 0.0
     for i in pbar:
-        rng, rng_step, rng_sample = split(rng, 3)
-        x_spt, y_spt, x_qry, y_qry = train_sample_fn(rng_sample)
-        spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
+        rng, rng_step, rng_sample, rng_augment = split(rng, 4)
+        x, y = train_sample_fn(rng_sample)
+        x = jax.device_put(x, device)
+        y = jax.device_put(y, device)
+        x = x / 255
+        x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
+        x = normalize_fn(x)
+        x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
 
+        spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
         (
             outer_opt_state,
             slow_params,
@@ -427,33 +451,75 @@ if __name__ == "__main__":
 
         if (i == 0) or (((i + 1) % cfg.val_interval) == 0):
             now = time.time()
-            rng, rng_test = split(rng)
-            fsl_maml_results = test_fsl_maml(
-                rng_test,
+            rng, rng_test_1, rng_test_5 = split(rng, 3)
+            fsl_maml_1_res = test_fn_ins(
+                rng_test_1,
                 slow_params,
                 fast_params,
                 slow_state,
                 fast_state,
-                cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
-                inner_opt.init,
-                test_fsl_sample_fn,
-                test_batched_outer_loop_ins,
+                num_batches=cfg.fsl_num_tasks_test // cfg.val.batch_size,
+                sample_fn=test_sample_fn_1,
+                build_fn=jit(
+                    partial(
+                        fsl_build,
+                        batch_size=cfg.val.batch_size,
+                        way=cfg.way,
+                        shot=1,
+                        qry_shot=15,
+                    )
+                ),
             )
-            fsl_maml_loss = fsl_maml_results[0].mean()
-            fsl_maml_acc = fsl_maml_results[1]["outer"]["final"]["aux"][0]["acc"].mean()
+            fsl_maml_5_res = test_fn_ins(
+                rng_test_5,
+                slow_params,
+                fast_params,
+                slow_state,
+                fast_state,
+                num_batches=cfg.fsl_num_tasks_test // cfg.val.batch_size,
+                sample_fn=test_sample_fn_5,
+                build_fn=jit(
+                    partial(
+                        fsl_build,
+                        batch_size=cfg.val.batch_size,
+                        way=cfg.way,
+                        shot=5,
+                        qry_shot=15,
+                    )
+                ),
+            )
+
+            fsl_maml_loss_1 = fsl_maml_1_res[0].mean()
+            fsl_maml_acc_1 = fsl_maml_1_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
+            fsl_maml_loss_5 = fsl_maml_5_res[0].mean()
+            fsl_maml_acc_5 = fsl_maml_5_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
             exp.log(f"\nValidation step {i} results:")
-            exp.log(f"FSL acc: {fsl_maml_acc}, loss: {fsl_maml_loss}")
+            exp.log(f"5-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}")
+            exp.log(f"5-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}")
 
-            if fsl_maml_acc > best_val_acc:
-                best_val_acc = fsl_maml_acc
-                exp.log(f"\  New best validation accuracy: {best_val_acc}")
+            exp.log_metrics(
+                {
+                    "acc_5": fsl_maml_acc_5,
+                    "acc_1": fsl_maml_acc_1,
+                    "loss_5": fsl_maml_loss_5,
+                    "loss_1": fsl_maml_loss_1,
+                },
+                step=i + 1,
+                prefix="val",
+            )
+
+            if fsl_maml_acc_5 > best_val_acc:
+                best_val_acc = fsl_maml_acc_5
+                exp.log(f"\  New best 5-way-5-shot validation accuracy: {best_val_acc}")
                 exp.log("Saving checkpoint\n")
                 with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
                     dill.dump(
                         {
-                            "val_acc": best_val_acc,
-                            "val_loss": fsl_maml_loss,
+                            "val_acc_1": fsl_maml_acc_1,
+                            "val_loss_1": fsl_maml_loss_1,
+                            "val_acc_5": fsl_maml_acc_5,
+                            "val_loss_5": fsl_maml_loss_5,
                             "optimizer_state": outer_opt_state,
                             "slow_params": slow_params,
                             "fast_params": fast_params,
@@ -466,60 +532,25 @@ if __name__ == "__main__":
                         protocol=3,
                     )
 
-            # fsl_embeddings_preds, fsl_embeddings_targets = test_fsl_embeddings(
-            #     rng_test,
-            #     partial(embeddings_fn, slow_params, slow_state),
-            #     test_fsl_sample_fn,
-            #     cfg.fsl_num_tasks_test // cfg.meta_batch_size_test,
-            #     device=device,
-            #     pool=cfg.pool,
-            # )
-            # fsl_embeddings_acc = (
-            #     (fsl_embeddings_preds == fsl_embeddings_targets)
-            #     .astype(onp.float)
-            #     .mean()
-            # )
-
-            # sup_preds, sup_targets = test_sup_cosine(
-            #     partial(embeddings_fn, slow_params, slow_state),
-            #     test_sup_spt_sampler,
-            #     test_sup_qry_sampler,
-            #     device,
-            #     preprocess_fn,
-            # )
-            # sup_acc = (sup_preds == sup_targets).astype(onp.float).mean()
-
-            # transfer_preds, transfer_targets = test_sup_cosine(
-            #     partial(embeddings_fn, slow_params, slow_state),
-            #     test_transfer_spt_sampler,
-            #     test_transfer_qry_sampler,
-            #     device,
-            #     preprocess_fn,
-            # )
-            # transfer_acc = (transfer_preds == transfer_targets).astype(onp.float).mean()
-
-            # test_time = time.time() - now
-
         if (
             (i == 0)
             or (((i + 1) % cfg.progress_bar_refresh_rate) == 0)
             or (((i + 1) % cfg.val_interval) == 0)
         ):
-            current_lr = lr_schedule(outer_opt_state[-1].count)
+            exp.log_metrics(
+                {
+                    "foa": info["outer"]["final"]["aux"][0]["acc"].mean(),
+                    "loss": info["outer"]["final"]["loss"].mean(),
+                },
+                step=i + 1,
+                prefix="train",
+            )
+
+            current_lr = schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
-                # ttime=f"{test_time:.1f}",
                 loss=f"{info['outer']['final']['loss'].mean():.2f}",
                 foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.2f}",
-                vam=f"{fsl_maml_acc:.2f}",
-                # vae=f"{fsl_embeddings_acc:.2f}",
-                # vas=f"{sup_acc:.2f}",
-                # vat=f"{transfer_acc:.2f}",
-                # vfol=f"{vfol:.3f}",
-                # vioa=f"{vioa:.3f}",
-                # vfoa=f"{vfoa:.3f}",
-                # bfoa=f"{best_val_acc:.3f}",
-                # fia=f"{info['inner']['auxs'][0]['acc'][:, -1].mean():.3f}",
-                # iil=f"{info['inner']['losses'][:, 0].mean():.3f}",
-                # fil=f"{info['inner']['losses'][:, -1].mean():.3f}",
+                va1=f"{fsl_maml_acc_1:.2f}",
+                va5=f"{fsl_maml_acc_5:.2f}",
             )
