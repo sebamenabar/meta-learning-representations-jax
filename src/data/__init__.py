@@ -16,7 +16,7 @@ from .omniglot import (
     # mean as omn_mean,
     # std as omn_std,
 )
-
+import data.augmentations as augmentations
 
 statistics = {
     "miniimagenet": (mi_mean, mi_std),
@@ -42,6 +42,24 @@ def prepare_data(dataset, data_fp, device):
     labels = jnp.array(labels)
 
     return images, labels, _normalize_fn
+
+
+def augment(rng, imgs, color_jitter_prob=1.0):
+    rng_crop, rng_color, rng_flip = split(rng, 3)
+    imgs = augmentations.random_crop(imgs, rng_crop, 84, ((8, 8), (8, 8), (0, 0)))
+    imgs = augmentations.color_transform(
+        imgs,
+        rng_color,
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.4,
+        hue=0.0,
+        color_jitter_prob=color_jitter_prob,
+        to_grayscale_prob=0.0,
+    )
+    imgs = augmentations.random_flip(imgs, rng_flip)
+    # imgs = normalize_fn(imgs)
+    return imgs
 
 
 # def prepare_data(dataset, data_dir, device, prefetch_data_gpu=False, normalized=False):
