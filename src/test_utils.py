@@ -7,8 +7,9 @@ import jax
 from jax.random import split
 from jax import vmap, tree_multimap, numpy as jnp, partial
 
-from lib import xe_and_acc
-from data.sampling import BatchSampler, fsl_sample_transfer_build
+from lib import xe_and_acc, flatten
+# from data import augment as augment_fn
+from data.sampling import BatchSampler, fsl_build
 
 
 def test_fsl_maml(
@@ -21,11 +22,23 @@ def test_fsl_maml(
     inner_opt_init,
     sample_fn,
     batched_outer_loop,
+    normalize_fn,
+    build_fn,
+    augment_fn=None,
+    device=None,
 ):
     results = []
     for _ in range(num_batches):
-        rng, rng_sample, rng_apply = split(rng, 3)
-        x_spt_test, y_spt_test, x_qry_test, y_qry_test = sample_fn(rng_sample)
+        rng, rng_augment, rng_sample, rng_apply = split(rng, 4)
+        x, y = sample_fn(rng_sample)
+        x = jax.device_put(x, device)
+        y = jax.device_put(y, device)
+        x = x / 255
+        x_spt, y_spt, x_qry, y_qry = build_fn(x, y)
+        if augment_fn:
+            x_spt = augment_fn(rng_augment, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+        x_spt = normalize_fn(x_spt)
+        x_qry = normalize_fn(x_qry)
 
         loss, (_, _, info) = batched_outer_loop(
             slow_params,
@@ -33,11 +46,11 @@ def test_fsl_maml(
             slow_state,
             fast_state,
             inner_opt_init(fast_params),
-            split(rng_apply, x_spt_test.shape[0]),
-            x_spt_test,
-            y_spt_test,
-            x_qry_test,
-            y_qry_test,
+            split(rng_apply, x_spt.shape[0]),
+            x_spt,
+            y_spt,
+            x_qry,
+            y_qry,
         )
         results.append((loss, info))
     results = tree_multimap(lambda x, *xs: jnp.stack(xs), results[0], *results)
