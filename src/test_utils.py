@@ -8,6 +8,7 @@ from jax.random import split
 from jax import vmap, tree_multimap, numpy as jnp, partial
 
 from lib import xe_and_acc, flatten
+
 # from data import augment as augment_fn
 from data.sampling import BatchSampler, fsl_build
 
@@ -36,7 +37,9 @@ def test_fsl_maml(
         x = x / 255
         x_spt, y_spt, x_qry, y_qry = build_fn(x, y)
         if augment_fn:
-            x_spt = augment_fn(rng_augment, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+            x_spt = augment_fn(rng_augment, flatten(x_spt, (0, 1))).reshape(
+                *x_spt.shape
+            )
         x_spt = normalize_fn(x_spt)
         x_qry = normalize_fn(x_qry)
 
@@ -72,6 +75,7 @@ def test_fsl_embeddings(
     is_norm=True,
     device=None,
     pool=0,
+    n_jobs=2,
 ):
 
     if pool > 0:
@@ -118,7 +122,7 @@ def test_fsl_embeddings(
         else:
             for i in range(batch_size):
                 preds.append(
-                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=4)
+                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=n_jobs)
                 )
 
     if pool is not None:
@@ -163,6 +167,19 @@ def forward_loader(pred_fn, loader, device, is_norm=False, normalize_fn=None):
         all_preds.append(onp.array(preds))
         all_targets.append(onp.array(y))
     return onp.concatenate(all_preds), onp.concatenate(all_targets)
+
+
+def test_sup_lr(emb_fn, spt_loader, qry_loader, device, preprocess_fn=None, n_jobs=2):
+    spt_preds, spt_targets = forward_loader(
+        emb_fn, spt_loader, device, True, preprocess_fn
+    )
+    qry_preds, qry_targets = forward_loader(
+        emb_fn, qry_loader, device, True, preprocess_fn
+    )
+
+    cosine_distance = spt_preds @ qry_preds.transpose()
+    max_idx = onp.argmax(cosine_distance, axis=0)
+    return spt_targets[max_idx], qry_targets
 
 
 def test_sup_cosine(pred_fn, spt_loader, qry_loader, device, preprocess_fn=None):
@@ -262,13 +279,7 @@ class FSLLRTester:
 
 class SupervisedStandardTester:
     def __init__(
-        self,
-        rng,
-        test_images,
-        test_labels,
-        batch_size,
-        normalize_fn=None,
-        device=None,
+        self, rng, test_images, test_labels, batch_size, normalize_fn=None, device=None,
     ):
         self.test_images = test_images
         self.test_images = test_labels
@@ -279,8 +290,7 @@ class SupervisedStandardTester:
         self.device = device
 
     def __call__(
-        self,
-        forward_fn,
+        self, forward_fn,
     ):
         preds, targets = forward_loader(
             forward_fn, self.loader, self.device, normalize_fn=self.normalize_fn,
