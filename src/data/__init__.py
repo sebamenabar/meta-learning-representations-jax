@@ -29,24 +29,21 @@ def normalize_fn(x, mean, std):
     return (x - mean) / std
 
 
-def prepare_data(dataset, data_fp, device):
+def prepare_data(dataset, data_fp):
     mean, std = statistics[dataset]
     if dataset == "miniimagenet":
-        images, labels, _ = prepare_mi_data(data_fp, "train")
-        # val_images, val_labels, _ = prepare_mi_data(data_dir, "val")
-        mean = jax.device_put(mean, device)
-        std = jax.device_put(std, device)
+        images, labels, _ = prepare_mi_data(data_fp)
         _normalize_fn = partial(normalize_fn, mean=mean, std=std)
 
-    images = jnp.array(images)
-    labels = jnp.array(labels)
 
     return images, labels, _normalize_fn
 
 
 def augment(rng, imgs, color_jitter_prob=1.0):
     rng_crop, rng_color, rng_flip = split(rng, 3)
-    imgs = augmentations.random_crop(imgs, rng_crop, 84, ((8, 8), (8, 8), (0, 0)))
+    imgs = augmentations.random_crop(
+        imgs, rng_crop, 84, ((8, 8), (8, 8), (0, 0))
+    )  # Padding 8 pixels on each spatial dim, none on channel dim
     imgs = augmentations.color_transform(
         imgs,
         rng_color,
