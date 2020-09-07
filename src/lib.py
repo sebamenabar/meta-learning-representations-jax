@@ -90,17 +90,17 @@ def mean_xe_and_acc_dict(logits, targets):
 
 
 def apply_and_loss_fn(
+    slow_apply,
+    fast_apply,
+    loss_fn,
     slow_params,
     fast_params,
     slow_state,
     fast_state,
     rng,
     inputs,
-    targets,
     is_training,
-    slow_apply,
-    fast_apply,
-    loss_fn,
+    targets,
 ):
     slow_rng, fast_rng = split(rng)
 
@@ -116,14 +116,14 @@ def apply_and_loss_fn(
 
 
 def fast_apply_and_loss_fn(
+    fast_apply,
+    loss_fn,
     fast_params,
     fast_state,
     rng,
     slow_outputs,
-    is_training,
     targets,
-    fast_apply,
-    loss_fn,
+    is_training,
 ):
     outputs, state = fast_apply(
         fast_params, fast_state, rng, *slow_outputs, is_training
@@ -133,18 +133,18 @@ def fast_apply_and_loss_fn(
 
 
 def batched_outer_loop(
+    outer_loop,
     slow_params,
     fast_params,
     slow_state,
     fast_state,
     inner_opt_state,
-    brng,
+    rngs,
     bx_spt,
     by_spt,
     bx_qry,
     by_qry,
     spt_classes,
-    outer_loop,
 ):
     losses, aux = vmap(
         partial(
@@ -155,11 +155,15 @@ def batched_outer_loop(
             fast_state,
             inner_opt_state,
         )
-    )(brng, bx_spt, by_spt, bx_qry, by_qry, spt_classes)
+    )(rngs, bx_spt, by_spt, bx_qry, by_qry, spt_classes)
     return losses.mean(), aux
 
 
 def outer_loop(
+    slow_apply,
+    fast_apply,
+    loss_fn,
+    inner_loop,  # instantiated inner_loop
     slow_params,
     fast_params,
     slow_state,
@@ -172,41 +176,19 @@ def outer_loop(
     y_qry,
     spt_classes,
     is_training,
-    inner_loop,  # instantiated inner_loop
-    slow_apply,
-    fast_apply,
-    loss_fn,
-    train_method=None,
+    reset_fast_params_fn=None,
 ):
-    if train_method == "fsl-reset-per-task":
-        print("Resetting fast params per task")
-        fast_params = hk.data_structures.merge(
-            {
-                "mini_imagenet_cnn_head/linear": {
-                    "w": ops.index_update(
-                        fast_params["mini_imagenet_cnn_head/linear"]["w"],
-                        ops.index[:, spt_classes],
-                        jnp.zeros(
-                            (
-                                fast_params["mini_imagenet_cnn_head/linear"]["w"].shape[
-                                    0
-                                ],
-                                spt_classes.shape[0],
-                            )
-                        ),
-                    )
-                }
-            }
-        )
+    if reset_fast_params_fn:
+        pass # TODO
     _fast_apply_and_loss_fn = partial(
-        fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
+        fast_apply_and_loss_fn, fast_apply, loss_fn, is_training=is_training,
     )
     rng_outer_slow, rng_outer_fast, rng_inner = split(rng, 3)
     slow_outputs, initial_slow_state = slow_apply(
         slow_params, slow_state, rng_outer_slow, x_qry, is_training,
     )
     initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_outer_fast, slow_outputs, False, y_qry,
+        fast_params, fast_state, rng_outer_fast, slow_outputs, y_qry,
     )
 
     fast_params, inner_slow_state, fast_state, inner_opt_state, inner_auxs = inner_loop(
@@ -220,13 +202,13 @@ def outer_loop(
         y_spt,
     )
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
+        fast_params, fast_state, rng_outer_fast, slow_outputs, y_qry,
     )
     return (
         final_loss,
         (
-            initial_slow_state,
-            fast_state,
+            (initial_slow_state,
+            fast_state),
             {
                 "inner": inner_auxs,
                 "outer": {
@@ -239,6 +221,10 @@ def outer_loop(
 
 
 def fsl_inner_loop(
+    slow_apply,
+    fast_apply,
+    loss_fn,
+    opt_update_fn,
     slow_params,
     fast_params,
     slow_state,
@@ -249,15 +235,11 @@ def fsl_inner_loop(
     targets,
     is_training,
     num_steps,
-    slow_apply,
-    fast_apply,
-    loss_fn,
-    opt_update_fn,
     update_state=False,
     return_history=True,
 ):
     _fast_apply_and_loss_fn = partial(
-        fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
+        fast_apply_and_loss_fn, fast_apply, loss_fn, is_training=is_training,
     )
     rng_slow, *rngs = split(rng, num_steps + 2)
     slow_outputs, slow_state = slow_apply(
@@ -270,7 +252,8 @@ def fsl_inner_loop(
     for i in range(num_steps):
         (loss, (new_fast_state, *aux)), grads = value_and_grad(
             _fast_apply_and_loss_fn, has_aux=True
-        )(fast_params, fast_state, rngs[i], slow_outputs, is_training, targets)
+        )(fast_params, fast_state, rngs[i], slow_outputs, targets)
+
         if update_state:
             fast_state = new_fast_state
         if i == 0:
@@ -285,7 +268,7 @@ def fsl_inner_loop(
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rngs[i + 1], slow_outputs, is_training, targets,
+        fast_params, fast_state, rngs[i + 1], slow_outputs, targets,
     )
     if return_history:
         losses.append(final_loss)
