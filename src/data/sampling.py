@@ -10,6 +10,48 @@ def shuffle_along_axis(rng, a, axis):
     return jnp.take_along_axis(a, idx, axis=axis)
 
 
+class FSLSampler:
+    def __init__(self, X, y, shuffle_labels=False):
+        self.X = X
+        self.y = y
+        self.data_shape = X.shape[2:]
+        self.num_classes = X.shape[0]
+        self.samples_per_class = X.shape[1]
+        self.shuffle_labels = shuffle_labels
+
+    def sample(self, rng, batch_size, way, shot):
+        rng_classes, rng_idxs = split(rng)
+        sampled_classes = shuffle_along_axis(
+            rng_classes, onp.arange(self.num_classes)[None, :].repeat(batch_size, 0), 1
+        )[:, :way]
+        # Flatten everything for indexing
+        sampled_classes = sampled_classes.reshape(batch_size * way, 1)
+        # Repeat each class idx shot times
+        sampled_classes = sampled_classes.repeat(shot, 1)
+
+        # For each task for each class sample shot indexes
+        sampled_idxs = shuffle_along_axis(
+            rng_idxs,
+            onp.arange(self.samples_per_class)[None].repeat(batch_size * way, 0),
+            1,
+        )[:, :shot]
+
+        sampled_images = self.X[sampled_classes, sampled_idxs]
+        sampled_images = sampled_images.reshape(batch_size, way, shot, *self.data_shape)
+
+        if self.shuffle_labels:
+            sampled_labels = (
+                onp.repeat(onp.arange(way), shot)
+                .reshape(way, shot)[None, :]
+                .repeat(batch_size, 0)
+            )
+        else:
+            sampled_labels = self.y[sampled_classes, sampled_idxs]
+            sampled_labels = sampled_labels.reshape(batch_size, way, shot)
+
+        return sampled_images, sampled_labels
+
+
 def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
     rng_classes, rng_idxs = split(rng)
     if not disjoint:
@@ -79,15 +121,15 @@ def fsl_sample(
 
 
 def fsl_build(
-    images, labels, batch_size, way, shot, qry_shot,
+    images, labels, num_devices, batch_size, way, shot, qry_shot,
 ):
     image_shape = images.shape[-3:]
-    x_spt, x_qry = jnp.split(images, (shot,), 2)
-    x_spt = x_spt.reshape(batch_size, way * shot, *image_shape)
-    x_qry = x_qry.reshape(batch_size, way * qry_shot, *image_shape)
-    y_spt, y_qry = jnp.split(labels, (shot,), 2)
-    y_spt = y_spt.reshape(batch_size, way * shot)
-    y_qry = y_qry.reshape(batch_size, way * qry_shot)
+    x_spt, x_qry = onp.split(images, (shot,), 2)
+    x_spt = x_spt.reshape(num_devices, batch_size, way * shot, *image_shape)
+    x_qry = x_qry.reshape(num_devices, batch_size, way * qry_shot, *image_shape)
+    y_spt, y_qry = onp.split(labels, (shot,), 2)
+    y_spt = y_spt.reshape(num_devices, batch_size, way * shot)
+    y_qry = y_qry.reshape(num_devices, batch_size, way * qry_shot)
     return x_spt, y_spt, x_qry, y_qry
 
 
