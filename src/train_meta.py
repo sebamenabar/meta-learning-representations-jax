@@ -36,7 +36,7 @@ from lib import (
     mean_xe_and_acc_dict,
     # outer_loop_reset_per_task,
 )
-from data import prepare_data, augment
+from data import prepare_data, augment as augment_fn
 from experiment import Experiment, Logger
 from data.sampling import fsl_sample, fsl_build, BatchSampler
 from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
@@ -222,6 +222,24 @@ def step_reset(
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
 
+def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
+    x_spt = x_spt / 255
+    x_qry = x_qry / 255
+    if augment == "all":
+        rng_spt, rng_qry = split(rng)
+        x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+        x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+    elif augment == "spt":
+        x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+    elif augment == "qry":
+        x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+
+    x_spt = normalize_fn(x_spt)
+    x_qry = normalize_fn(x_qry)
+
+    return x_spt, x_qry
+
+
 if __name__ == "__main__":
     # parser = parse_args()
     args, cfg = parse_args()
@@ -346,7 +364,6 @@ if __name__ == "__main__":
             train_method=cfg.train.reset_head,
         ),
     )
-    augment = jit(augment)
     fsl_build_ins = jit(
         partial(
             fsl_build,
@@ -407,7 +424,7 @@ if __name__ == "__main__":
         #         qry_shot=15,
         #     )
         # ),
-        augment_fn=augment,
+        augment_fn=None,
         device=device,
     )
 
@@ -428,6 +445,16 @@ if __name__ == "__main__":
         for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
     ]
 
+    # augment = jit(augment)
+    preprocess_images_jins = jit(
+        partial(
+            preprocess_images,
+            normalize_fn=normalize_fn,
+            augment=cfg.train.augment,
+            augment_fn=augment_fn,
+        )
+    )
+
     pbar = tqdm(
         range(1, 1 + cfg.train.num_outer_steps),
         file=sys.stdout,
@@ -441,10 +468,11 @@ if __name__ == "__main__":
         x, y = train_sample_fn(rng_sample)
         x = jax.device_put(x, device)
         y = jax.device_put(y, device)
-        x = x / 255
-        x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
-        x = normalize_fn(x)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
+        x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
+        # x = x / 255
+        # x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
+        # x = normalize_fn(x)
 
         spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
         (
