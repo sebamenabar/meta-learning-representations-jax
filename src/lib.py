@@ -177,6 +177,7 @@ def outer_loop(
     fast_apply,
     loss_fn,
     train_method=None,
+    track_slow_state="none",
 ):
     if train_method == "fsl-reset-per-task":
         print("Resetting fast params per task")

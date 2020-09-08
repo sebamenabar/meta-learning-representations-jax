@@ -30,6 +30,7 @@ class ConvBlock(hk.Module):
         name=None,
         track_stats=False,
         initializer="glorot_uniform",
+        norm_before_act=True,
     ):
         super().__init__(name=name)
         self.output_channels = output_channels
@@ -38,6 +39,7 @@ class ConvBlock(hk.Module):
         self.max_pool_factor = max_pool_factor
         self.normalize = normalize
         self.stride = stride = (int(2 * max_pool_factor), int(2 * max_pool_factor), 1)
+        self.norm_before_act = norm_before_act
         # if activation == "relu":
         #     self.activation = jax.nn.relu
         # elif activation == "swish":
@@ -69,7 +71,7 @@ class ConvBlock(hk.Module):
             w_init=self.initializer,
             b_init=hk.initializers.Constant(0.0),
         )(x)
-        if self.normalize:
+        if self.normalize and self.norm_before_act:
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
@@ -82,6 +84,18 @@ class ConvBlock(hk.Module):
                 test_local_stats=not self.track_stats,
             )
         x = self.activation(x)
+        if self.normalize and not self.norm_before_act:
+            x = hk.BatchNorm(
+                create_scale=True,
+                create_offset=True,
+                decay_rate=0.9
+                if self.track_stats
+                else 0.0,  # 0 for no tracking of stats
+            )(
+                x,
+                is_training=self.track_stats and is_training,
+                test_local_stats=not self.track_stats,
+            )
         if self.max_pool:
             x = hk.MaxPool(
                 window_shape=self.stride, strides=self.stride, padding="VALID"
@@ -101,6 +115,7 @@ class ConvBase(hk.Module):
         track_stats=False,
         name=None,
         initializer=None,
+        norm_before_act=True,
     ):
         super().__init__(name=name)
         self.output_channels = output_channels
@@ -111,6 +126,7 @@ class ConvBase(hk.Module):
         self.normalize = normalize
         self.track_stats = track_stats
         self.initializer = initializer
+        self.norm_before_act = norm_before_act
 
     def __call__(self, x, is_training):
         for _ in range(self.layers):
@@ -123,6 +139,7 @@ class ConvBase(hk.Module):
                 normalize=self.normalize,
                 track_stats=self.track_stats,
                 initializer=self.initializer,
+                norm_before_act=self.norm_before_act,
             )(x, is_training)
         return x
 
@@ -139,6 +156,8 @@ class MiniImagenetCNNBody(hk.Module):
         max_pool=True,
         track_stats=False,
         initializer=None,
+        norm_before_act=True,
+        final_norm=False,
     ):
         super().__init__(name=name)
         self.layers = layers
@@ -148,6 +167,8 @@ class MiniImagenetCNNBody(hk.Module):
         self.max_pool = max_pool
         self.track_stats = track_stats
         self.initializer = initializer
+        self.norm_before_act = norm_before_act
+        self.final_norm = final_norm
 
     def __call__(self, x, is_training):
         x = ConvBase(
@@ -157,7 +178,21 @@ class MiniImagenetCNNBody(hk.Module):
             max_pool_factor=4 // self.layers,
             track_stats=self.track_stats,
             initializer=self.initializer,
+            norm_before_act=self.norm_before_act,
+            normalize=self.normalize,
         )(x, is_training)
+        if self.final_norm:
+            x = hk.BatchNorm(
+                create_scale=True,
+                create_offset=True,
+                decay_rate=0.9
+                if self.track_stats
+                else 0.0,  # 0 for no tracking of stats
+            )(
+                x,
+                is_training=self.track_stats and is_training,
+                test_local_stats=not self.track_stats,
+            )
         return (x,)
 
 
@@ -212,6 +247,9 @@ def make_miniimagenet_cnn(
     activation="relu",
     track_stats=False,
     head_bias=True,
+    norm_before_act=True,
+    final_norm=False,
+    normalize=True,
 ):
     MiniImagenetCNNBody_t = hk.transform_with_state(
         lambda x, is_training: MiniImagenetCNNBody(
@@ -220,6 +258,9 @@ def make_miniimagenet_cnn(
             activation=activation,
             track_stats=track_stats,
             initializer=initializer,
+            norm_before_act=norm_before_act,
+            final_norm=final_norm,
+            normalize=normalize,
         )(
             x, is_training,
         )
@@ -243,14 +284,7 @@ def make_miniimagenet_cnn(
     )
 
 
-def make_params(
-    rng,
-    dataset,
-    slow_init,
-    slow_apply,
-    fast_init,
-    # device,
-):
+def make_params(rng, dataset, slow_init, slow_apply, fast_init):
     slow_rng, fast_rng = split(rng)
     if dataset == "miniimagenet":
         setup_tensor = jnp.zeros((2, 84, 84, 3))
@@ -259,11 +293,6 @@ def make_params(
     slow_params, slow_state = slow_init(slow_rng, setup_tensor, True)
     slow_outputs, _ = slow_apply(slow_params, slow_state, slow_rng, setup_tensor, True)
     fast_params, fast_state = fast_init(fast_rng, *slow_outputs, True)
-    # move_to_device = lambda x: jax.device_put(x, device)
-    # slow_params = jax.tree_map(move_to_device, slow_params)
-    # fast_params = jax.tree_map(move_to_device, fast_params)
-    # slow_state = jax.tree_map(move_to_device, slow_state)
-    # fast_state = jax.tree_map(move_to_device, fast_state)
 
     return slow_params, fast_params, slow_state, fast_state
 
@@ -277,6 +306,9 @@ def prepare_model(
     avg_pool=False,
     track_stats=False,
     head_bias=True,
+    norm_before_act=True,
+    final_norm=False,
+    normalize=True,
 ):
     if dataset == "miniimagenet":
         max_pool = True
@@ -295,5 +327,8 @@ def prepare_model(
         initializer=initializer,
         avg_pool=avg_pool,
         head_bias=head_bias,
+        norm_before_act=norm_before_act,
+        final_norm=final_norm,
+        normalize=normalize,
     )
 

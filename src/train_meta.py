@@ -115,6 +115,9 @@ def parse_args(parser=None):
     )
     parser.add_argument("--model.avg_pool", default=False, action="store_true")
     parser.add_argument("--model.head_bias", default=False, action="store_true")
+    parser.add_argument("--model.norm_before_act", default=1, type=int, choices=[0, 1])
+    parser.add_argument("--model.final_norm", default=False, action="store_true")
+    parser.add_argument("--model.normalize", default=1, type=int, choices=[0, 1])
 
     args = parser.parse_args()
     cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
@@ -226,13 +229,20 @@ def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_f
     x_spt = x_spt / 255
     x_qry = x_qry / 255
     if augment == "all":
+        print("\nAugmenting support and query\n")
         rng_spt, rng_qry = split(rng)
         x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
         x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
     elif augment == "spt":
+        print("\nAugmenting support only\n")
         x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
     elif augment == "qry":
+        print("\nAugmenting query only\n")
         x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+    elif augment == "none":
+        print("\nNo augmentation\n")
+    else:
+        raise NameError(f"Unkwown augmentation {augment}")
 
     x_spt = normalize_fn(x_spt)
     x_qry = normalize_fn(x_qry)
@@ -301,6 +311,8 @@ if __name__ == "__main__":
         initializer=cfg.model.initializer,
         avg_pool=cfg.model.avg_pool,
         head_bias=cfg.model.head_bias,
+        norm_before_act=cfg.model.norm_before_act,
+        final_norm=cfg.model.final_norm,
     )
     # Optimizers
     inner_opt = ox.sgd(cfg.train.inner_lr)
