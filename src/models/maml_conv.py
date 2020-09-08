@@ -87,13 +87,13 @@ class ConvBlock(hk.Module):
             )
 
         elif self.normalize == "gn":
-            x = hk.GroupNorm(groups=4)
+            x = hk.GroupNorm(groups=4)(x)
         elif self.normalize == "in":
-            x = hk.InstanceNorm(create_scale=True, create_offset=True)
+            x = hk.InstanceNorm(create_scale=True, create_offset=True)(x)
         elif self.normalize == "ln":
             x = hk.LayerNorm(
                 axis=slice(1, None, None), create_scale=True, create_offset=True
-            )
+            )(x)
 
         if self.norm_before_act:
             x = self.activation(x)
@@ -200,9 +200,9 @@ class MiniImagenetCNNBody(hk.Module):
                 test_local_stats=not self.track_stats,
             )
         elif self.final_norm == "gn":
-            x = hk.GroupNorm(4)
+            x = hk.GroupNorm(4)(x)
         elif self.final_norm == "in":
-            x = hk.InstanceNorm(create_scale=True, create_offset=True)
+            x = hk.InstanceNorm(create_scale=True, create_offset=True)(x)
         return (x,)
 
 
