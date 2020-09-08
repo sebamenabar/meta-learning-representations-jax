@@ -208,6 +208,14 @@ def outer_loop(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
     rng_outer_slow, rng_outer_fast, rng_inner = split(rng, 3)
+    # To have proper statitics on the first step we need to compute
+    # them before the first inner loop
+    slow_outputs, outer_slow_state = slow_apply(
+        slow_params, slow_state, rng_outer_slow, x_qry, is_training,
+    )
+    if "outer" in track_slow_state:
+        print("Using outer statistics")
+        slow_state = outer_slow_state
 
     (
         inner_fast_params,
@@ -227,11 +235,6 @@ def outer_loop(
     )
     if "inner" in track_slow_state:
         slow_state = inner_slow_state
-    slow_outputs, outer_slow_state = slow_apply(
-        slow_params, slow_state, rng_outer_slow, x_qry, is_training,
-    )
-    if "outer" in track_slow_state:
-        slow_state = outer_slow_state
     initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
         fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
     )
