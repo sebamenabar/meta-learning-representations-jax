@@ -77,12 +77,12 @@ class ConvBlock(hk.Module):
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.95
+                decay_rate=0.999
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(
                 x,
-                is_training=self.track_stats and is_training,
+                is_training=is_training,
                 test_local_stats=not self.track_stats,
             )
 
@@ -191,12 +191,12 @@ class MiniImagenetCNNBody(hk.Module):
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.95
+                decay_rate=0.999
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(
                 x,
-                is_training=self.track_stats and is_training,
+                is_training=is_training,
                 test_local_stats=not self.track_stats,
             )
         elif self.final_norm == "gn":

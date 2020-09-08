@@ -118,6 +118,7 @@ def parse_args(parser=None):
     parser.add_argument("--model.norm_before_act", default=1, type=int, choices=[0, 1])
     parser.add_argument("--model.final_norm", default="none", choices=["bn", "gn", "in", "ln", "none"])
     parser.add_argument("--model.normalize", default="bn", type=str, choices=["bn", "gn", "in", "ln", "none"])
+    parser.add_argument("--model.track_stats", default="none", type=str, choices=["none", "inner", "outer", "inner", "inner-outer"])
 
     args = parser.parse_args()
     cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
@@ -189,7 +190,7 @@ def step_reset(
     train_method,
 ):
     if train_method == "fsl-reset-zero":
-        print("\nReseting head params to zero\n")
+        print("\nReseting head params to zero")
         fast_params = hk.data_structures.merge(
             {
                 "mini_imagenet_cnn_head/linear": {
@@ -229,18 +230,18 @@ def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_f
     x_spt = x_spt / 255
     x_qry = x_qry / 255
     if augment == "all":
-        print("\nAugmenting support and query\n")
+        print("\nAugmenting support and query")
         rng_spt, rng_qry = split(rng)
         x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
         x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
     elif augment == "spt":
-        print("\nAugmenting support only\n")
+        print("\nAugmenting support only")
         x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
     elif augment == "qry":
-        print("\nAugmenting query only\n")
+        print("\nAugmenting query only")
         x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
     elif augment == "none":
-        print("\nNo augmentation\n")
+        print("\nNo augmentation")
     else:
         raise NameError(f"Unkwown augmentation {augment}")
 
@@ -275,7 +276,10 @@ if __name__ == "__main__":
     rng = random.PRNGKey(cfg.seed)  # Default seed is 0
     exp.log(f"Running on {device} with seed: {cfg.seed}")
     exp.log(f"JAX available CPUS {jax.devices('cpu')}")
-    exp.log(f"JAX available GPUS {jax.devices('gpu')}")
+    try:
+        exp.log(f"JAX available GPUS {jax.devices('gpu')}")
+    except RuntimeError:
+        pass
 
     # Data
     train_images, train_labels, normalize_fn = prepare_data(
@@ -307,7 +311,7 @@ if __name__ == "__main__":
         cfg.model.output_size,
         cfg.model.hidden_size,
         cfg.model.activation,
-        track_stats=False,
+        track_stats=cfg.model.track_stats != "none",
         initializer=cfg.model.initializer,
         avg_pool=cfg.model.avg_pool,
         head_bias=cfg.model.head_bias,
@@ -343,7 +347,7 @@ if __name__ == "__main__":
 
     train_inner_loop_ins = partial(
         fsl_inner_loop,
-        is_training=True,
+        is_training="inner" in cfg.model.track_stats,
         num_steps=cfg.train.num_inner_steps,
         slow_apply=body.apply,
         fast_apply=head.apply,
@@ -352,12 +356,13 @@ if __name__ == "__main__":
     )
     train_outer_loop_ins = partial(
         outer_loop,
-        is_training=True,
+        is_training="outer" in cfg.model.track_stats,
         inner_loop=train_inner_loop_ins,
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
         train_method=cfg.train.reset_head,
+        track_slow_state=cfg.model.track_stats,
     )
     train_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=train_outer_loop_ins
@@ -417,6 +422,7 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
+        track_slow_state="none",
     )
     test_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=test_outer_loop_ins, spt_classes=None,
@@ -457,6 +463,9 @@ if __name__ == "__main__":
         jax.device_put(t, device)
         for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
     ]
+    replicate_array = lambda x: jnp.broadcast_to(x, (cfg.train.batch_size,) + x.shape)
+    replicate_array_test = lambda x: jnp.broadcast_to(x, (cfg.val.fsl.batch_size,) + x.shape)
+    replicated_slow_state, replicated_fast_state = tree_map(replicate_array, (slow_state, fast_state))
 
     # augment = jit(augment)
     preprocess_images_jins = jit(
@@ -492,8 +501,8 @@ if __name__ == "__main__":
             outer_opt_state,
             slow_params,
             fast_params,
-            slow_state,
-            fast_state,
+            replicated_slow_state,
+            replicated_fast_state,
             info,
         ) = step_ins(
             rng_step,
@@ -501,8 +510,8 @@ if __name__ == "__main__":
             outer_opt_state,
             slow_params,
             fast_params,
-            slow_state,
-            fast_state,
+            replicated_slow_state,
+            replicated_fast_state,
             x_spt,
             y_spt,
             x_qry,
@@ -511,14 +520,18 @@ if __name__ == "__main__":
         )
 
         if (i == 1) or (((i) % cfg.train.val_interval) == 0):
+            slow_state = jax.tree_map(lambda xs: xs[0], replicated_slow_state)
+            fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
+            test_slow_state = tree_map(replicate_array_test, slow_state)
+            test_fast_state = tree_map(replicate_array_test, fast_state)
             now = time.time()
             rng, rng_test_1, rng_test_5 = split(rng, 3)
             fsl_maml_1_res = test_fn_ins(
                 rng_test_1,
                 slow_params,
                 fast_params,
-                slow_state,
-                fast_state,
+                test_slow_state,
+                test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_1,
                 build_fn=jit(
@@ -535,8 +548,8 @@ if __name__ == "__main__":
                 rng_test_5,
                 slow_params,
                 fast_params,
-                slow_state,
-                fast_state,
+                test_slow_state,
+                test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_5,
                 build_fn=jit(

@@ -135,8 +135,8 @@ def fast_apply_and_loss_fn(
 def batched_outer_loop(
     slow_params,
     fast_params,
-    slow_state,
-    fast_state,
+    replicated_slow_state,
+    replicated_fast_state,
     inner_opt_state,
     brng,
     bx_spt,
@@ -146,16 +146,21 @@ def batched_outer_loop(
     spt_classes,
     outer_loop,
 ):
-    losses, aux = vmap(
-        partial(
-            outer_loop,
-            slow_params,
-            fast_params,
-            slow_state,
-            fast_state,
-            inner_opt_state,
+    def helper(slow_state, fast_state, *args):
+        return outer_loop(
+            slow_params, fast_params, slow_state, fast_state, inner_opt_state, *args
         )
-    )(brng, bx_spt, by_spt, bx_qry, by_qry, spt_classes)
+
+    losses, aux = vmap(helper)(
+        replicated_slow_state,
+        replicated_fast_state,
+        brng,
+        bx_spt,
+        by_spt,
+        bx_qry,
+        by_qry,
+        spt_classes,
+    )
     return losses.mean(), aux
 
 
@@ -203,14 +208,14 @@ def outer_loop(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
     rng_outer_slow, rng_outer_fast, rng_inner = split(rng, 3)
-    slow_outputs, initial_slow_state = slow_apply(
-        slow_params, slow_state, rng_outer_slow, x_qry, is_training,
-    )
-    initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_outer_fast, slow_outputs, False, y_qry,
-    )
 
-    fast_params, inner_slow_state, fast_state, inner_opt_state, inner_auxs = inner_loop(
+    (
+        inner_fast_params,
+        inner_slow_state,
+        fast_state,
+        inner_opt_state,
+        inner_auxs,
+    ) = inner_loop(
         slow_params,
         fast_params,
         slow_state,
@@ -220,13 +225,23 @@ def outer_loop(
         x_spt,
         y_spt,
     )
-    final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
+    if "inner" in track_slow_state:
+        slow_state = inner_slow_state
+    slow_outputs, outer_slow_state = slow_apply(
+        slow_params, slow_state, rng_outer_slow, x_qry, is_training,
+    )
+    if "outer" in track_slow_state:
+        slow_state = outer_slow_state
+    initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
         fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
+    )
+    final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
+        inner_fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
     )
     return (
         final_loss,
         (
-            initial_slow_state,
+            slow_state,
             fast_state,
             {
                 "inner": inner_auxs,
