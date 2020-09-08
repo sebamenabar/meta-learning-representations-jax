@@ -40,6 +40,8 @@ from experiment import Experiment, Logger
 from data.sampling import FSLSampler, fsl_build
 from models.maml_conv import prepare_model, make_params
 
+from acme.jax import utils as acme_utils
+
 def parse_args(parser=None):
     parser = Experiment.add_args(parser)
     # parser = miniimagenet_cnn_argparse(parser)
@@ -63,6 +65,7 @@ def parse_args(parser=None):
     parser.add_argument("--train.piecewise_constant_schedule", nargs="*", type=int, default=[10000, 25000])
 
     parser.add_argument("--train.augment", default="none", choices=["none", "all", "spt", "qry"])
+    parser.add_argument("--train.num_prefetch", default=10, type=int)
 
     parser.add_argument("--model.output_size", type=int)
     parser.add_argument("--model.hidden_size", default=32, type=int)
@@ -132,17 +135,19 @@ def step(
     return outer_opt_state, slow_params, fast_params, *states, logs
 
 def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
+    x_spt = x_spt / 255
+    x_qry = x_qry / 255
     if augment == "all":
         rng_spt, rng_qry = split(rng)
-        x_spt = augment_fn(rng_spt, x_spt)
-        x_qry = augment_fn(rng_qry, x_qry)
+        x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+        x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
     elif augment == "spt":
-        x_spt = augment_fn(rng, x_spt)
+        x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
     elif augment == "qry":
-        x_qry = augment_fn(rng, x_qry)
+        x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
         
-    x_spt = normalize_fn(x_spt / 255)
-    x_qry = normalize_fn(x_qry / 255)
+    x_spt = normalize_fn(x_spt)
+    x_qry = normalize_fn(x_qry)
     
     return x_spt, x_qry
 
@@ -166,19 +171,21 @@ if __name__ == "__main__":
     jit_enabled = not cfg.disable_jit
     rng = random.PRNGKey(cfg.seed)  # Default seed is 0
     exp.log(f"Seed {cfg.seed}")
+    exp.log(f"JAX available CPUS {jax.devices('cpu')}")
     exp.log(f"JAX available devices {jax.devices()}")
     num_devices = max(cfg.gpus, 1)
     exp.log(f"Using {num_devices} devices")
+    cpu = jax.devices("cpu")[0]
 
     # Data
-    train_images, train_labels, normalize_fn = prepare_data(
+    train_images, train_labels, normalize_fn, (mean, std) = prepare_data(
         cfg.dataset,
         osp.join(
             cfg.data_dir,
             "miniImageNet_category_split_train_phase_train_ordered.pickle",
         ),
     )
-    val_images, _val_labels, _ = prepare_data(
+    val_images, _val_labels, _, _ = prepare_data(
         cfg.dataset,
         osp.join(cfg.data_dir, "miniImageNet_category_split_val_ordered.pickle",),
     )
@@ -223,11 +230,19 @@ if __name__ == "__main__":
           f'num devices {num_devices}')
     exp.log(f"Per device batch size: {per_device_batch_size}")
     sampler = FSLSampler(
-        train_images,
-        train_labels,
+        jax.device_put(train_images, cpu),
+        jax.device_put(train_labels, cpu),
         shuffle_labels=True, # TODO
     )
-    train_sample_jins = jit(partial(sampler.sample, batch_size=cfg.train.batch_size, way=cfg.train.way, shot=cfg.train.shot + cfg.train.qry_shot), static_argnums=(0,))
+    train_sample_ins = jit(partial(sampler.sample, batch_size=cfg.train.batch_size, way=cfg.train.way, shot=cfg.train.shot + cfg.train.qry_shot), static_argnums=0)
+    def iterator(rng):
+        rng, rng_sample = split(rng)
+        while True:
+            yield train_sample_ins(rng_sample)
+            rng, rng_sample = split(rng)
+    rng, rng_sampler = split(rng)
+    train_input = acme_utils.prefetch(iterator(rng_sampler), buffer_size=cfg.train.num_prefetch)
+
     fsl_build_jins = jit(
         partial(
             fsl_build,
@@ -288,14 +303,15 @@ if __name__ == "__main__":
     pbar = tqdm(
         range(cfg.train.num_outer_steps),
         file=sys.stdout,
-        miniters=25,
-        mininterval=5,
+        # miniters=25,
+        # mininterval=5,
         maxinterval=20,
     )
     best_val_acc = 0.0
     for i in pbar:
         rng, rng_step, rng_sample = split(rng, 3)
-        x, y = train_sample_jins(rng_sample)
+        # x, y = train_sample_jins(rng_sample)
+        x, y = next(train_input)
         x_spt, y_spt, x_qry, y_qry = fsl_build_jins(x, y)
 
         # spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
