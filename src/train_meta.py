@@ -116,8 +116,8 @@ def parse_args(parser=None):
     parser.add_argument("--model.avg_pool", default=False, action="store_true")
     parser.add_argument("--model.head_bias", default=False, action="store_true")
     parser.add_argument("--model.norm_before_act", default=1, type=int, choices=[0, 1])
-    parser.add_argument("--model.final_norm", default=False, action="store_true")
-    parser.add_argument("--model.normalize", default=1, type=int, choices=[0, 1])
+    parser.add_argument("--model.final_norm", default="none", choices=["bn", "gn", "in", "ln", "none"])
+    parser.add_argument("--model.normalize", default="bn", type=str, choices=["bn", "gn", "in", "ln", "none"])
 
     args = parser.parse_args()
     cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
@@ -313,6 +313,7 @@ if __name__ == "__main__":
         head_bias=cfg.model.head_bias,
         norm_before_act=cfg.model.norm_before_act,
         final_norm=cfg.model.final_norm,
+        normalize=cfg.model.normalize,
     )
     # Optimizers
     inner_opt = ox.sgd(cfg.train.inner_lr)

@@ -71,11 +71,13 @@ class ConvBlock(hk.Module):
             w_init=self.initializer,
             b_init=hk.initializers.Constant(0.0),
         )(x)
-        if self.normalize and self.norm_before_act:
+        if not self.norm_before_act:
+            x = self.activation(x)
+        if self.normalize == "bn":
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.9
+                decay_rate=0.95
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(
@@ -83,19 +85,18 @@ class ConvBlock(hk.Module):
                 is_training=self.track_stats and is_training,
                 test_local_stats=not self.track_stats,
             )
-        x = self.activation(x)
-        if self.normalize and not self.norm_before_act:
-            x = hk.BatchNorm(
-                create_scale=True,
-                create_offset=True,
-                decay_rate=0.9
-                if self.track_stats
-                else 0.0,  # 0 for no tracking of stats
-            )(
-                x,
-                is_training=self.track_stats and is_training,
-                test_local_stats=not self.track_stats,
+
+        elif self.normalize == "gn":
+            x = hk.GroupNorm(groups=4)
+        elif self.normalize == "in":
+            x = hk.InstanceNorm(create_scale=True, create_offset=True)
+        elif self.normalize == "ln":
+            x = hk.LayerNorm(
+                axis=slice(1, None, None), create_scale=True, create_offset=True
             )
+
+        if self.norm_before_act:
+            x = self.activation(x)
         if self.max_pool:
             x = hk.MaxPool(
                 window_shape=self.stride, strides=self.stride, padding="VALID"
@@ -158,6 +159,7 @@ class MiniImagenetCNNBody(hk.Module):
         initializer=None,
         norm_before_act=True,
         final_norm=False,
+        avg_pool=False,
     ):
         super().__init__(name=name)
         self.layers = layers
@@ -169,6 +171,7 @@ class MiniImagenetCNNBody(hk.Module):
         self.initializer = initializer
         self.norm_before_act = norm_before_act
         self.final_norm = final_norm
+        self.avg_pool = avg_pool
 
     def __call__(self, x, is_training):
         x = ConvBase(
@@ -181,11 +184,14 @@ class MiniImagenetCNNBody(hk.Module):
             norm_before_act=self.norm_before_act,
             normalize=self.normalize,
         )(x, is_training)
-        if self.final_norm:
+        if self.avg_pool:
+            x = hk.avg_pool(x, (1, 5, 5, 1), 1, padding="VALID", channel_axis=3)
+            x = hk.Reshape((self.hidden_size,))(x)
+        if self.final_norm == "bn":
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.9
+                decay_rate=0.95
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(
@@ -193,6 +199,10 @@ class MiniImagenetCNNBody(hk.Module):
                 is_training=self.track_stats and is_training,
                 test_local_stats=not self.track_stats,
             )
+        elif self.final_norm == "gn":
+            x = hk.GroupNorm(4)
+        elif self.final_norm == "in":
+            x = hk.InstanceNorm(create_scale=True, create_offset=True)
         return (x,)
 
 
@@ -224,8 +234,7 @@ class MiniImagenetCNNHead(hk.Module):
 
     def __call__(self, x, is_training):
         if self.avg_pool:
-            x = hk.avg_pool(x, (1, 5, 5, 1), 1, padding="VALID", channel_axis=3)
-            x = hk.Reshape((self.hidden_size,))(x)
+            pass
         else:
             x = hk.Reshape((self.spatial_dims * self.hidden_size,))(x)
         x = hk.Linear(
@@ -261,6 +270,7 @@ def make_miniimagenet_cnn(
             norm_before_act=norm_before_act,
             final_norm=final_norm,
             normalize=normalize,
+            avg_pool=avg_pool,
         )(
             x, is_training,
         )
