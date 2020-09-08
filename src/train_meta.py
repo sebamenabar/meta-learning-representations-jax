@@ -43,57 +43,66 @@ from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_para
 from test_utils import test_fsl_maml, test_fsl_embeddings
 from test_sup import test_sup_cosine
 
-TRAIN_SIZE = 500
-
 
 def parse_args(parser=None):
     parser = Experiment.add_args(parser)
-    parser = miniimagenet_cnn_argparse(parser)
+    # parser = miniimagenet_cnn_argparse(parser)
     # Training arguments
-    parser.add_argument("--batch_size", help="Number of FSL tasks", default=4, type=int)
+    parser.add_argument("--train.num_outer_steps", type=int, default=30000)
     parser.add_argument(
-        "--val.batch_size", help="Number of FSL tasks", default=25, type=int
-    )
-    parser.add_argument("--way", help="Number of classes per task", default=5, type=int)
-    parser.add_argument(
-        "--shot", help="Number of samples per class", default=5, type=int
+        "--train.batch_size", help="Number of FSL tasks", default=4, type=int
     )
     parser.add_argument(
-        "--qry_shot", type=int, help="Number of quried samples per class", default=10,
+        "--train.way", help="Number of classes per task", default=5, type=int
     )
     parser.add_argument(
-        "--val.qry_shot",
+        "--train.shot", help="Number of samples per class", default=5, type=int
+    )
+    parser.add_argument(
+        "--train.qry_shot",
         type=int,
         help="Number of quried samples per class",
-        default=15,
+        default=10,
     )
-    parser.add_argument("--lr_schedule", nargs="*", type=int, default=[10000, 25000])
-    parser.add_argument("--cosine", action="store_true", default=False)
+    parser.add_argument("--train.inner_lr", type=float, default=1e-2)
+    parser.add_argument("--train.outer_lr", type=float, default=1e-3)
+    parser.add_argument("--train.num_inner_steps", type=int, default=5)
 
-
-    # Optimization arguments
+    parser.add_argument("--train.cosine_schedule", action="store_true", default=False)
+    parser.add_argument("--train.cosine_alpha", type=float, default=0.01)
     parser.add_argument(
-        "--train_method",
+        "--train.piecewise_constant_schedule",
+        nargs="*",
+        type=int,
+        default=[10000, 25000],
+    )
+
+    parser.add_argument(
+        "--train.augment", default="none", choices=["none", "all", "spt", "qry"]
+    )
+    parser.add_argument("--train.num_prefetch", default=10, type=int)
+
+    parser.add_argument("--train.val_interval", type=int, default=1000)
+
+    parser.add_argument(
+        "--train.reset_head",
         type=str,
         default="fsl",
         choices=["fsl", "fsl-reset-zero", "fsl-reset-per-task"],
     )
-    parser.add_argument("--inner_lr", type=float, default=1e-2)
-    parser.add_argument("--outer_lr", type=float, default=1e-3)
-    parser.add_argument("--num_inner_steps_train", type=int, default=5)
-    parser.add_argument("--num_inner_steps_test", type=int, default=10)
-    parser.add_argument("--num_outer_steps", type=int, default=30000)
-    parser.add_argument(
-        "--disjoint_tasks",
-        action="store_true",
-        help="Classes between tasks do not repeat",
-        default=False,
-    )
 
-    parser.add_argument("--pool", type=int, default=4)
-    parser.add_argument("--fsl_num_tasks_test", type=int, default=600)
-    parser.add_argument("--val_interval", type=int, default=2000)
-    parser.add_argument("--no-augment", default=False, action="store_false")
+    parser.add_argument("--val.pool", type=int, default=4)
+    parser.add_argument(
+        "--val.fsl.batch_size", help="Number of FSL tasks", default=25, type=int
+    )
+    parser.add_argument(
+        "--val.fsl.qry_shot",
+        type=int,
+        help="Number of quried samples per class",
+        default=15,
+    )
+    parser.add_argument("--val.fsl.num_inner_steps", type=int, default=10)
+    parser.add_argument("--val.fsl.num_tasks", type=int, default=600)
 
     parser.add_argument("--model.output_size", type=int)
     parser.add_argument("--model.hidden_size", default=32, type=int)
@@ -106,10 +115,9 @@ def parse_args(parser=None):
     )
     parser.add_argument("--model.avg_pool", default=False, action="store_true")
     parser.add_argument("--model.head_bias", default=False, action="store_true")
-    
 
     args = parser.parse_args()
-    cfg = edict(val=edict(), model=edict())
+    cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
     for argname, argval in vars(args).items():
         rsetattr(cfg, argname, argval)
 
@@ -178,7 +186,7 @@ def step_reset(
     train_method,
 ):
     if train_method == "fsl-reset-zero":
-        print("Reseting head params to zero")
+        print("\nReseting head params to zero\n")
         fast_params = hk.data_structures.merge(
             {
                 "mini_imagenet_cnn_head/linear": {
@@ -238,6 +246,8 @@ if __name__ == "__main__":
     cpu, device = setup_device(cfg.gpus, default_platform="cpu")
     rng = random.PRNGKey(cfg.seed)  # Default seed is 0
     exp.log(f"Running on {device} with seed: {cfg.seed}")
+    exp.log(f"JAX available CPUS {jax.devices('cpu')}")
+    exp.log(f"JAX available GPUS {jax.devices('gpu')}")
 
     # Data
     train_images, train_labels, normalize_fn = prepare_data(
@@ -274,46 +284,36 @@ if __name__ == "__main__":
         avg_pool=cfg.model.avg_pool,
         head_bias=cfg.model.head_bias,
     )
-    rng, rng_params = split(rng)
-    (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng_params, cfg.dataset, body.init, body.apply, head.init, device,
-    )
-
     # Optimizers
-    inner_opt = ox.sgd(cfg.inner_lr)
-    if cfg.cosine:
-        schedule = ox.cosine_decay_schedule(-cfg.outer_lr, cfg.num_outer_steps, 0.05)
+    inner_opt = ox.sgd(cfg.train.inner_lr)
+    if cfg.train.cosine_schedule:
+        schedule = ox.cosine_decay_schedule(
+            -cfg.train.outer_lr, cfg.train.num_outer_steps, cfg.train.cosine_alpha
+        )
     else:
         schedule = ox.piecewise_constant_schedule(
-            -cfg.outer_lr, {e: 0.1 for e in cfg.lr_schedule}
+            -cfg.train.outer_lr, {e: 0.1 for e in cfg.train.piecewise_constant_schedule}
         )
     outer_opt = ox.chain(
         ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(schedule),
     )
-    if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
-        outer_opt_state = outer_opt.init((slow_params, fast_params))
-    elif cfg.train_method == "fsl-reset-zero":
-        outer_opt_state = outer_opt.init(slow_params)
-
-    # Train data sampling
 
     train_sample_fn_kwargs = {
         "images": train_images,
         "labels": train_labels,
-        "num_tasks": cfg.batch_size,
-        "way": cfg.way,
-        "spt_shot": cfg.shot,
-        "qry_shot": cfg.qry_shot,
+        "num_tasks": cfg.train.batch_size,
+        "way": cfg.train.way,
+        "spt_shot": cfg.train.shot,
+        "qry_shot": cfg.train.qry_shot,
         "shuffled_labels": True,
         "disjoint": False,  # tasks can share classes
     }
     train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
 
-    # Train loops
     train_inner_loop_ins = partial(
         fsl_inner_loop,
         is_training=True,
-        num_steps=cfg.num_inner_steps_train,
+        num_steps=cfg.train.num_inner_steps,
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
@@ -326,14 +326,16 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
-        train_method=cfg.train_method,
+        train_method=cfg.train.reset_head,
     )
     train_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=train_outer_loop_ins
     )
-    if (cfg.train_method == "fsl") or (cfg.train_method == "fsl-reset-per-task"):
+    if (cfg.train.reset_head == "fsl") or (
+        cfg.train.reset_head == "fsl-reset-per-task"
+    ):
         step_ins = step
-    elif cfg.train_method == "fsl-reset-zero":
+    elif cfg.train.reset_head == "fsl-reset-zero":
         step_ins = step_reset
     step_ins = jit(
         partial(
@@ -341,25 +343,26 @@ if __name__ == "__main__":
             inner_opt_init=inner_opt.init,
             outer_opt_update=outer_opt.update,
             batched_outer_loop_ins=train_batched_outer_loop_ins,
-            train_method=cfg.train_method,
+            train_method=cfg.train.reset_head,
         ),
     )
     augment = jit(augment)
     fsl_build_ins = jit(
         partial(
             fsl_build,
-            batch_size=cfg.batch_size,
-            way=cfg.way,
-            shot=cfg.shot,
-            qry_shot=cfg.qry_shot,
+            batch_size=cfg.train.batch_size,
+            way=cfg.train.way,
+            shot=cfg.train.shot,
+            qry_shot=cfg.train.qry_shot,
         )
     )
+
     # Val data sampling
     test_sample_fn_kwargs = {
         "images": val_images,
         "labels": val_labels,
-        "num_tasks": cfg.val.batch_size,
-        "way": cfg.way,
+        "num_tasks": cfg.val.fsl.batch_size,
+        "way": 5,
         # "spt_shot": 1,
         "qry_shot": 15,
         "shuffled_labels": True,
@@ -371,7 +374,7 @@ if __name__ == "__main__":
     test_inner_loop_ins = partial(
         fsl_inner_loop,
         is_training=False,
-        num_steps=cfg.num_inner_steps_test,
+        num_steps=cfg.val.fsl.num_inner_steps,
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
@@ -408,8 +411,25 @@ if __name__ == "__main__":
         device=device,
     )
 
+    rng, rng_params = split(rng)
+    (slow_params, fast_params, slow_state, fast_state,) = make_params(
+        rng_params, cfg.dataset, body.init, body.apply, head.init,
+    )
+
+    if (cfg.train.reset_head == "fsl") or (
+        cfg.train.reset_head == "fsl-reset-per-task"
+    ):
+        outer_opt_state = outer_opt.init((slow_params, fast_params))
+    elif cfg.train.reset_head == "fsl-reset-zero":
+        outer_opt_state = outer_opt.init(slow_params)
+
+    (slow_params, fast_params, slow_state, fast_state, outer_opt_state) = [
+        jax.device_put(t, device)
+        for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
+    ]
+
     pbar = tqdm(
-        range(cfg.num_outer_steps),
+        range(1, 1 + cfg.train.num_outer_steps),
         file=sys.stdout,
         miniters=25,
         mininterval=10,
@@ -449,7 +469,7 @@ if __name__ == "__main__":
             spt_classes,
         )
 
-        if (i == 0) or (((i + 1) % cfg.val_interval) == 0):
+        if (i == 1) or (((i) % cfg.train.val_interval) == 0):
             now = time.time()
             rng, rng_test_1, rng_test_5 = split(rng, 3)
             fsl_maml_1_res = test_fn_ins(
@@ -458,13 +478,13 @@ if __name__ == "__main__":
                 fast_params,
                 slow_state,
                 fast_state,
-                num_batches=cfg.fsl_num_tasks_test // cfg.val.batch_size,
+                num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_1,
                 build_fn=jit(
                     partial(
                         fsl_build,
-                        batch_size=cfg.val.batch_size,
-                        way=cfg.way,
+                        batch_size=cfg.val.fsl.batch_size,
+                        way=5,
                         shot=1,
                         qry_shot=15,
                     )
@@ -476,13 +496,13 @@ if __name__ == "__main__":
                 fast_params,
                 slow_state,
                 fast_state,
-                num_batches=cfg.fsl_num_tasks_test // cfg.val.batch_size,
+                num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_5,
                 build_fn=jit(
                     partial(
                         fsl_build,
-                        batch_size=cfg.val.batch_size,
-                        way=cfg.way,
+                        batch_size=cfg.val.fsl.batch_size,
+                        way=5,
                         shot=5,
                         qry_shot=15,
                     )
@@ -505,7 +525,7 @@ if __name__ == "__main__":
                     "loss_5": fsl_maml_loss_5,
                     "loss_1": fsl_maml_loss_1,
                 },
-                step=i + 1,
+                step=i,
                 prefix="val",
             )
 
@@ -533,16 +553,16 @@ if __name__ == "__main__":
                     )
 
         if (
-            (i == 0)
-            or (((i + 1) % cfg.progress_bar_refresh_rate) == 0)
-            or (((i + 1) % cfg.val_interval) == 0)
+            (i == 1)
+            or (((i) % cfg.progress_bar_refresh_rate) == 0)
+            or (((i) % cfg.train.val_interval) == 0)
         ):
             exp.log_metrics(
                 {
                     "foa": info["outer"]["final"]["aux"][0]["acc"].mean(),
                     "loss": info["outer"]["final"]["loss"].mean(),
                 },
-                step=i + 1,
+                step=i,
                 prefix="train",
             )
 

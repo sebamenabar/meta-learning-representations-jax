@@ -243,7 +243,14 @@ def make_miniimagenet_cnn(
     )
 
 
-def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
+def make_params(
+    rng,
+    dataset,
+    slow_init,
+    slow_apply,
+    fast_init,
+    # device,
+):
     slow_rng, fast_rng = split(rng)
     if dataset == "miniimagenet":
         setup_tensor = jnp.zeros((2, 84, 84, 3))
@@ -252,11 +259,11 @@ def make_params(rng, dataset, slow_init, slow_apply, fast_init, device):
     slow_params, slow_state = slow_init(slow_rng, setup_tensor, True)
     slow_outputs, _ = slow_apply(slow_params, slow_state, slow_rng, setup_tensor, True)
     fast_params, fast_state = fast_init(fast_rng, *slow_outputs, True)
-    move_to_device = lambda x: jax.device_put(x, device)
-    slow_params = jax.tree_map(move_to_device, slow_params)
-    fast_params = jax.tree_map(move_to_device, fast_params)
-    slow_state = jax.tree_map(move_to_device, slow_state)
-    fast_state = jax.tree_map(move_to_device, fast_state)
+    # move_to_device = lambda x: jax.device_put(x, device)
+    # slow_params = jax.tree_map(move_to_device, slow_params)
+    # fast_params = jax.tree_map(move_to_device, fast_params)
+    # slow_state = jax.tree_map(move_to_device, slow_state)
+    # fast_state = jax.tree_map(move_to_device, fast_state)
 
     return slow_params, fast_params, slow_state, fast_state
 
