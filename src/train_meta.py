@@ -455,6 +455,10 @@ if __name__ == "__main__":
         "disjoint": False,  # tasks can share classes
     }
 
+    test_preprocess_images_jins = jit(
+        partial(preprocess_images, normalize_fn=normalize_fn)
+    )
+
     def sample_fn(rng, way, shot):
         rng_sample, rng_augment = split(rng)
         x, y = fsl_sample(rng_sample, way=way, spt_shot=shot, **test_sample_fn_kwargs)
@@ -463,12 +467,12 @@ if __name__ == "__main__":
         x_spt, y_spt, x_qry, y_qry = fsl_build(
             x, y, batch_size=cfg.val.fsl.batch_size, way=way, shot=shot, qry_shot=15
         )
-        x_spt, x_qry = preprocess_images(rng_augment, x_spt, x_qry, normalize_fn)
+        x_spt, x_qry = test_preprocess_images_jins(rng_augment, x_spt, x_qry)
         return x_spt, y_spt, x_qry, y_qry
 
     # For testing with Multinomial Rgression
-    test_sample_fn_5_w_1_s = partial(sample_fn, way=5, shot=5)
-    test_sample_fn_5_w_5_s = partial(sample_fn, way=5, shot=1)
+    test_sample_fn_5_w_1_s = partial(sample_fn, way=5, shot=1)
+    test_sample_fn_5_w_5_s = partial(sample_fn, way=5, shot=5)
     # For MAML style test
     test_sample_fn_1_shot = partial(
         fsl_sample, spt_shot=1, way=cfg.train.way, **test_sample_fn_kwargs,
@@ -620,14 +624,12 @@ if __name__ == "__main__":
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_1_shot,
-                build_fn=jit(
-                    partial(
-                        fsl_build,
-                        batch_size=cfg.val.fsl.batch_size,
-                        way=5,
-                        shot=1,
-                        qry_shot=15,
-                    )
+                build_fn=partial(
+                    fsl_build,
+                    batch_size=cfg.val.fsl.batch_size,
+                    way=5,
+                    shot=1,
+                    qry_shot=15,
                 ),
             )
             fsl_maml_5_res = test_fn_ins(
@@ -638,14 +640,12 @@ if __name__ == "__main__":
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
                 sample_fn=test_sample_fn_5_shot,
-                build_fn=jit(
-                    partial(
-                        fsl_build,
-                        batch_size=cfg.val.fsl.batch_size,
-                        way=5,
-                        shot=5,
-                        qry_shot=15,
-                    )
+                build_fn=partial(
+                    fsl_build,
+                    batch_size=cfg.val.fsl.batch_size,
+                    way=5,
+                    shot=5,
+                    qry_shot=15,
                 ),
             )
 
@@ -675,8 +675,12 @@ if __name__ == "__main__":
             exp.log(f"\nValidation step {counter} results:")
             exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
             exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
-            exp.log(f"{cfg.train.way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}")
-            exp.log(f"{cfg.train.way}-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}")
+            exp.log(
+                f"{cfg.train.way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}"
+            )
+            exp.log(
+                f"{cfg.train.way}-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}"
+            )
 
             exp.log_metrics(
                 {
@@ -739,7 +743,7 @@ if __name__ == "__main__":
                 foa=f"{train_final_outer_acc:.2f}",
                 va1=f"{fsl_maml_acc_1:.2f}",
                 va5=f"{fsl_maml_acc_5:.2f}",
-                vlr5=f"{fsl_lr_5_acc}",
-                vlr1=f"{fsl_lr_1_acc}",
+                vlr5=f"{fsl_lr_5_acc:.2f}",
+                vlr1=f"{fsl_lr_1_acc:.2f}",
                 refresh=False,
             )
