@@ -68,6 +68,8 @@ def parse_args(parser=None):
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
 
+    parser.add_argument("--train.weight_decay", default=0.0, type=float)
+    parser.add_argument("--train.apply_every", default=1, type=int)
     parser.add_argument("--train.cosine_schedule", action="store_true", default=False)
     parser.add_argument("--train.cosine_alpha", type=float, default=0.01)
     parser.add_argument(
@@ -116,9 +118,21 @@ def parse_args(parser=None):
     parser.add_argument("--model.avg_pool", default=False, action="store_true")
     parser.add_argument("--model.head_bias", default=False, action="store_true")
     parser.add_argument("--model.norm_before_act", default=1, type=int, choices=[0, 1])
-    parser.add_argument("--model.final_norm", default="none", choices=["bn", "gn", "in", "ln", "none"])
-    parser.add_argument("--model.normalize", default="bn", type=str, choices=["bn", "gn", "in", "ln", "none"])
-    parser.add_argument("--model.track_stats", default="none", type=str, choices=["none", "inner", "outer", "inner", "inner-outer"])
+    parser.add_argument(
+        "--model.final_norm", default="none", choices=["bn", "gn", "in", "ln", "none"]
+    )
+    parser.add_argument(
+        "--model.normalize",
+        default="bn",
+        type=str,
+        choices=["bn", "gn", "in", "ln", "none"],
+    )
+    parser.add_argument(
+        "--model.track_stats",
+        default="none",
+        type=str,
+        choices=["none", "inner", "outer", "inner", "inner-outer"],
+    )
 
     args = parser.parse_args()
     cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
@@ -319,6 +333,13 @@ if __name__ == "__main__":
         final_norm=cfg.model.final_norm,
         normalize=cfg.model.normalize,
     )
+    effective_batch_size, ragged = divmod(cfg.train.batch_size, cfg.train.apply_every)
+    if ragged:
+        raise ValueError(
+            f"Global batch size {cfg.train.batch_size} must be divisible by "
+            f"apply_every {cfg.train.apply_every}"
+        )
+
     # Optimizers
     inner_opt = ox.sgd(cfg.train.inner_lr)
     if cfg.train.cosine_schedule:
@@ -330,13 +351,18 @@ if __name__ == "__main__":
             -cfg.train.outer_lr, {e: 0.1 for e in cfg.train.piecewise_constant_schedule}
         )
     outer_opt = ox.chain(
-        ox.clip(10), ox.scale_by_adam(), ox.scale_by_schedule(schedule),
+        ox.clip(10),
+        ox.scale(1 / cfg.train.apply_every),
+        ox.apply_every(cfg.train.apply_every),
+        ox.additive_weight_decay(cfg.train.weight_decay),
+        ox.scale_by_adam(),
+        ox.scale_by_schedule(schedule),
     )
 
     train_sample_fn_kwargs = {
         "images": train_images,
         "labels": train_labels,
-        "num_tasks": cfg.train.batch_size,
+        "num_tasks": effective_batch_size,
         "way": cfg.train.way,
         "spt_shot": cfg.train.shot,
         "qry_shot": cfg.train.qry_shot,
@@ -464,8 +490,12 @@ if __name__ == "__main__":
         for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
     ]
     replicate_array = lambda x: jnp.broadcast_to(x, (cfg.train.batch_size,) + x.shape)
-    replicate_array_test = lambda x: jnp.broadcast_to(x, (cfg.val.fsl.batch_size,) + x.shape)
-    replicated_slow_state, replicated_fast_state = tree_map(replicate_array, (slow_state, fast_state))
+    replicate_array_test = lambda x: jnp.broadcast_to(
+        x, (cfg.val.fsl.batch_size,) + x.shape
+    )
+    replicated_slow_state, replicated_fast_state = tree_map(
+        replicate_array, (slow_state, fast_state)
+    )
 
     # augment = jit(augment)
     preprocess_images_jins = jit(
