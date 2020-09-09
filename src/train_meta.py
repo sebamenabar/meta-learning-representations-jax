@@ -24,6 +24,7 @@ from jax import (
 
 import optax as ox
 import haiku as hk
+from acme.jax import utils as acme_utils
 
 from config import rsetattr
 from lib import (
@@ -68,6 +69,7 @@ def parse_args(parser=None):
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
 
+    parser.add_argument("--train.prefetch", default=0, type=int)
     parser.add_argument("--train.weight_decay", default=0.0, type=float)
     parser.add_argument("--train.apply_every", default=1, type=int)
     parser.add_argument("--train.cosine_schedule", action="store_true", default=False)
@@ -339,12 +341,15 @@ if __name__ == "__main__":
             f"Global batch size {cfg.train.batch_size} must be divisible by "
             f"apply_every {cfg.train.apply_every}"
         )
+    exp.log(f"Effective batch size: {effective_batch_size}")
 
     # Optimizers
     inner_opt = ox.sgd(cfg.train.inner_lr)
     if cfg.train.cosine_schedule:
         schedule = ox.cosine_decay_schedule(
-            -cfg.train.outer_lr, cfg.train.num_outer_steps, cfg.train.cosine_alpha
+            -cfg.train.outer_lr,
+            cfg.train.num_outer_steps * cfg.train.apply_every,
+            cfg.train.cosine_alpha,
         )
     else:
         schedule = ox.piecewise_constant_schedule(
@@ -370,6 +375,19 @@ if __name__ == "__main__":
         "disjoint": False,  # tasks can share classes
     }
     train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
+
+    def iterator(rng):
+        rng, rng_sample = split(rng)
+        while True:
+            yield train_sample_fn(rng_sample)
+            rng, rng_sample = split(rng)
+
+    if cfg.train.prefetch > 0:
+        exp.log(f"Using ACME prefetch {cfg.train.prefetch}")
+        rng, rng_sampler = split(rng)
+        train_input = acme_utils.prefetch(
+            iterator(rng_sampler), buffer_size=cfg.train.prefetch
+        )
 
     train_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -411,7 +429,7 @@ if __name__ == "__main__":
     fsl_build_ins = jit(
         partial(
             fsl_build,
-            batch_size=cfg.train.batch_size,
+            batch_size=effective_batch_size,
             way=cfg.train.way,
             shot=cfg.train.shot,
             qry_shot=cfg.train.qry_shot,
@@ -489,7 +507,7 @@ if __name__ == "__main__":
         jax.device_put(t, device)
         for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
     ]
-    replicate_array = lambda x: jnp.broadcast_to(x, (cfg.train.batch_size,) + x.shape)
+    replicate_array = lambda x: jnp.broadcast_to(x, (effective_batch_size,) + x.shape)
     replicate_array_test = lambda x: jnp.broadcast_to(
         x, (cfg.val.fsl.batch_size,) + x.shape
     )
@@ -515,9 +533,17 @@ if __name__ == "__main__":
         maxinterval=30,
     )
     best_val_acc = 0.0
-    for i in pbar:
+    counter = 0
+    for i in range(1, cfg.train.num_outer_steps * cfg.train.apply_every + 1):
+        if (i % cfg.train.apply_every) == 0:
+            pbar.update()
+            counter += 1
+
         rng, rng_step, rng_sample, rng_augment = split(rng, 4)
-        x, y = train_sample_fn(rng_sample)
+        if cfg.train.prefetch > 0:
+            x, y = next(train_input)
+        else:
+            x, y = train_sample_fn(rng_sample)
         x = jax.device_put(x, device)
         y = jax.device_put(y, device)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
@@ -536,7 +562,7 @@ if __name__ == "__main__":
             info,
         ) = step_ins(
             rng_step,
-            i,
+            counter,
             outer_opt_state,
             slow_params,
             fast_params,
@@ -549,7 +575,9 @@ if __name__ == "__main__":
             spt_classes,
         )
 
-        if (i == 1) or (((i) % cfg.train.val_interval) == 0):
+        if ((counter == 1) and (i == cfg.train.apply_every)) or (
+            ((i % cfg.train.apply_every) == 0) and ((counter) % cfg.train.val_interval) == 0
+        ):
             slow_state = jax.tree_map(lambda xs: xs[0], replicated_slow_state)
             fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
             test_slow_state = tree_map(replicate_array_test, slow_state)
@@ -598,7 +626,7 @@ if __name__ == "__main__":
             fsl_maml_loss_5 = fsl_maml_5_res[0].mean()
             fsl_maml_acc_5 = fsl_maml_5_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
-            exp.log(f"\nValidation step {i} results:")
+            exp.log(f"\nValidation step {counter} results:")
             exp.log(f"5-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}")
             exp.log(f"5-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}")
 
@@ -609,7 +637,7 @@ if __name__ == "__main__":
                     "loss_5": fsl_maml_loss_5,
                     "loss_1": fsl_maml_loss_1,
                 },
-                step=i,
+                step=counter,
                 prefix="val",
             )
 
@@ -630,31 +658,35 @@ if __name__ == "__main__":
                             "slow_state": slow_state,
                             "fast_state": fast_state,
                             "rng": rng,
-                            "i": i,
+                            "counter": counter,
                         },
                         f,
                         protocol=3,
                     )
 
-        if (
-            (i == 1)
-            or (((i) % cfg.progress_bar_refresh_rate) == 0)
-            or (((i) % cfg.train.val_interval) == 0)
+        # print(counter, i)
+        if ((counter == 1) and (i == cfg.train.apply_every)) or (
+            ((i % cfg.train.apply_every) == 0)
+            and ((((counter) % cfg.progress_bar_refresh_rate) == 0)
+            or (((counter) % cfg.train.val_interval) == 0))
         ):
+            train_loss = info["outer"]["final"]["loss"].mean()
+            train_final_outer_acc = info["outer"]["final"]["aux"][0]["acc"].mean()
             exp.log_metrics(
                 {
-                    "foa": info["outer"]["final"]["aux"][0]["acc"].mean(),
-                    "loss": info["outer"]["final"]["loss"].mean(),
+                    "foa": train_final_outer_acc,
+                    "loss": train_loss,
                 },
-                step=i,
+                step=counter,
                 prefix="train",
             )
 
             current_lr = schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
-                loss=f"{info['outer']['final']['loss'].mean():.2f}",
-                foa=f"{info['outer']['final']['aux'][0]['acc'].mean():.2f}",
+                loss=f"{train_loss:.2f}",
+                foa=f"{train_final_outer_acc:.2f}",
                 va1=f"{fsl_maml_acc_1:.2f}",
                 va5=f"{fsl_maml_acc_5:.2f}",
+                refresh=False,
             )
