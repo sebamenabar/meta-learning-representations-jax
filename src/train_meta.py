@@ -49,6 +49,8 @@ def parse_args(parser=None):
     parser = Experiment.add_args(parser)
     # parser = miniimagenet_cnn_argparse(parser)
     # Training arguments
+    parser.add_argument("--pool", type=int, default=0)
+
     parser.add_argument("--train.num_outer_steps", type=int, default=30000)
     parser.add_argument(
         "--train.batch_size", help="Number of FSL tasks", default=4, type=int
@@ -335,6 +337,11 @@ if __name__ == "__main__":
         final_norm=cfg.model.final_norm,
         normalize=cfg.model.normalize,
     )
+
+    @jit
+    def embeddings_fn(slow_params, slow_state, inputs):
+        return body.apply(slow_params, slow_state, None, inputs, None)[0][0]
+
     effective_batch_size, ragged = divmod(cfg.train.batch_size, cfg.train.apply_every)
     if ragged:
         raise ValueError(
@@ -441,14 +448,34 @@ if __name__ == "__main__":
         "images": val_images,
         "labels": val_labels,
         "num_tasks": cfg.val.fsl.batch_size,
-        "way": 5,
+        # "way": 5,
         # "spt_shot": 1,
         "qry_shot": 15,
         "shuffled_labels": True,
         "disjoint": False,  # tasks can share classes
     }
-    test_sample_fn_1 = partial(fsl_sample, spt_shot=1, **test_sample_fn_kwargs,)
-    test_sample_fn_5 = partial(fsl_sample, spt_shot=5, **test_sample_fn_kwargs,)
+
+    def sample_fn(rng, way, shot):
+        rng_sample, rng_augment = split(rng)
+        x, y = fsl_sample(rng_sample, way=way, spt_shot=shot, **test_sample_fn_kwargs)
+        x = jax.device_put(x, device)
+        y = jax.device_put(y, device)
+        x_spt, y_spt, x_qry, y_qry = fsl_build(
+            x, y, batch_size=cfg.val.fsl.batch_size, way=way, shot=shot, qry_shot=15
+        )
+        x_spt, x_qry = preprocess_images(rng_augment, x_spt, x_qry, normalize_fn)
+        return x_spt, y_spt, x_qry, y_qry
+
+    # For testing with Multinomial Rgression
+    test_sample_fn_5_w_1_s = partial(sample_fn, way=5, shot=5)
+    test_sample_fn_5_w_5_s = partial(sample_fn, way=5, shot=1)
+    # For MAML style test
+    test_sample_fn_1_shot = partial(
+        fsl_sample, spt_shot=1, way=cfg.train.way, **test_sample_fn_kwargs,
+    )
+    test_sample_fn_5_shot = partial(
+        fsl_sample, spt_shot=5, way=cfg.train.way, **test_sample_fn_kwargs,
+    )
     # Val loops
     test_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -576,14 +603,15 @@ if __name__ == "__main__":
         )
 
         if ((counter == 1) and (i == cfg.train.apply_every)) or (
-            ((i % cfg.train.apply_every) == 0) and ((counter) % cfg.train.val_interval) == 0
+            ((i % cfg.train.apply_every) == 0)
+            and ((counter) % cfg.train.val_interval) == 0
         ):
             slow_state = jax.tree_map(lambda xs: xs[0], replicated_slow_state)
             fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
             test_slow_state = tree_map(replicate_array_test, slow_state)
             test_fast_state = tree_map(replicate_array_test, fast_state)
             now = time.time()
-            rng, rng_test_1, rng_test_5 = split(rng, 3)
+            rng, rng_test_1, rng_test_5, rng_test_lr_1, rng_test_lr_5 = split(rng, 5)
             fsl_maml_1_res = test_fn_ins(
                 rng_test_1,
                 slow_params,
@@ -591,7 +619,7 @@ if __name__ == "__main__":
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                sample_fn=test_sample_fn_1,
+                sample_fn=test_sample_fn_1_shot,
                 build_fn=jit(
                     partial(
                         fsl_build,
@@ -609,7 +637,7 @@ if __name__ == "__main__":
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                sample_fn=test_sample_fn_5,
+                sample_fn=test_sample_fn_5_shot,
                 build_fn=jit(
                     partial(
                         fsl_build,
@@ -621,17 +649,39 @@ if __name__ == "__main__":
                 ),
             )
 
+            fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
+                rng_test_lr_1,
+                partial(embeddings_fn, slow_params, slow_state),
+                test_sample_fn_5_w_1_s,
+                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+                pool=cfg.pool,
+            )
+            fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
+                rng_test_lr_5,
+                partial(embeddings_fn, slow_params, slow_state),
+                test_sample_fn_5_w_5_s,
+                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+                pool=cfg.pool,
+            )
+
             fsl_maml_loss_1 = fsl_maml_1_res[0].mean()
             fsl_maml_acc_1 = fsl_maml_1_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
             fsl_maml_loss_5 = fsl_maml_5_res[0].mean()
             fsl_maml_acc_5 = fsl_maml_5_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
+            fsl_lr_1_acc = (fsl_lr_1_preds == fsl_lr_1_targets).astype(onp.float).mean()
+            fsl_lr_5_acc = (fsl_lr_5_preds == fsl_lr_5_targets).astype(onp.float).mean()
+
             exp.log(f"\nValidation step {counter} results:")
-            exp.log(f"5-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}")
-            exp.log(f"5-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}")
+            exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
+            exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
+            exp.log(f"{cfg.train.way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}")
+            exp.log(f"{cfg.train.way}-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}")
 
             exp.log_metrics(
                 {
+                    "5w5s-lr-acc": fsl_lr_5_acc,
+                    "5w1s-lr-acc": fsl_lr_1_acc,
                     "acc_5": fsl_maml_acc_5,
                     "acc_1": fsl_maml_acc_1,
                     "loss_5": fsl_maml_loss_5,
@@ -641,8 +691,8 @@ if __name__ == "__main__":
                 prefix="val",
             )
 
-            if fsl_maml_acc_5 > best_val_acc:
-                best_val_acc = fsl_maml_acc_5
+            if fsl_lr_5_acc > best_val_acc:
+                best_val_acc = fsl_lr_5_acc
                 exp.log(f"\  New best 5-way-5-shot validation accuracy: {best_val_acc}")
                 exp.log("Saving checkpoint\n")
                 with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
@@ -652,6 +702,8 @@ if __name__ == "__main__":
                             "val_loss_1": fsl_maml_loss_1,
                             "val_acc_5": fsl_maml_acc_5,
                             "val_loss_5": fsl_maml_loss_5,
+                            "val_lr_5w5s_acc": fsl_lr_5_acc,
+                            "val_lr_5w1s_acc": fsl_lr_1_acc,
                             "optimizer_state": outer_opt_state,
                             "slow_params": slow_params,
                             "fast_params": fast_params,
@@ -667,16 +719,15 @@ if __name__ == "__main__":
         # print(counter, i)
         if ((counter == 1) and (i == cfg.train.apply_every)) or (
             ((i % cfg.train.apply_every) == 0)
-            and ((((counter) % cfg.progress_bar_refresh_rate) == 0)
-            or (((counter) % cfg.train.val_interval) == 0))
+            and (
+                (((counter) % cfg.progress_bar_refresh_rate) == 0)
+                or (((counter) % cfg.train.val_interval) == 0)
+            )
         ):
             train_loss = info["outer"]["final"]["loss"].mean()
             train_final_outer_acc = info["outer"]["final"]["aux"][0]["acc"].mean()
             exp.log_metrics(
-                {
-                    "foa": train_final_outer_acc,
-                    "loss": train_loss,
-                },
+                {"foa": train_final_outer_acc, "loss": train_loss,},
                 step=counter,
                 prefix="train",
             )
@@ -688,5 +739,7 @@ if __name__ == "__main__":
                 foa=f"{train_final_outer_acc:.2f}",
                 va1=f"{fsl_maml_acc_1:.2f}",
                 va5=f"{fsl_maml_acc_5:.2f}",
+                vlr5=f"{fsl_lr_5_acc}",
+                vlr1=f"{fsl_lr_1_acc}",
                 refresh=False,
             )
