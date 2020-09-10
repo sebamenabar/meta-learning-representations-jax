@@ -67,6 +67,12 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=10,
     )
+    parser.add_argument(
+        "--train.cl.qry_way", default=1, type=int
+    )
+    parser.add_argument(
+        "--train.cl.qry_shot", default=1, type=int
+    )
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
@@ -89,7 +95,7 @@ def parse_args(parser=None):
     parser.add_argument("--train.num_prefetch", default=10, type=int)
 
     parser.add_argument("--train.val_interval", type=int, default=1000)
-
+    parser.add_argument("--train.method", default="fsl", choices=["fsl", "cl"])
     parser.add_argument(
         "--train.reset_head",
         type=str,
@@ -139,7 +145,7 @@ def parse_args(parser=None):
     )
 
     args = parser.parse_args()
-    cfg = edict(train=edict(), val=edict(fsl=edict()), model=edict())
+    cfg = edict(train=edict(cl=edict()), val=edict(fsl=edict()), model=edict())
     for argname, argval in vars(args).items():
         rsetattr(cfg, argname, argval)
 
@@ -397,23 +403,60 @@ if __name__ == "__main__":
         "way": cfg.train.way,
         "spt_shot": cfg.train.shot,
         "qry_shot": cfg.train.qry_shot,
-        "shuffled_labels": True,
+        "shuffled_labels": cfg.train.method == "fsl",
         "disjoint": False,  # tasks can share classes
     }
     train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
+    fsl_build_ins = jit(
+        partial(
+            fsl_build,
+            batch_size=effective_batch_size,
+            way=cfg.train.way,
+            shot=cfg.train.shot,
+            qry_shot=cfg.train.qry_shot,
+        )
+    )
+    if cfg.train.method == "cl":
+        exp.log("Training for continual learning")
+        train_cl_sample_fn_kwargs = {
+            "images": train_images,
+            "labels": train_labels,
+            "num_tasks": effective_batch_size,
+            "way": cfg.train.cl.qry_way,
+            "spt_shot": 0,
+            "qry_shot": cfg.train.cl.qry_shot,
+            "shuffled_labels": False,
+            "disjoint": False,  # tasks can share classes
+        }
+        train_cl_sample_fn = partial(fsl_sample, **train_cl_sample_fn_kwargs,)
+        cl_build_ins = jit(
+            partial(
+                fsl_build,
+                batch_size=effective_batch_size,
+                way=cfg.train.cl.qry_way,
+                shot=0,
+                qry_shot=cfg.train.qry_shot,
+            )
+        )
 
-    def iterator(rng):
+    def iterator(rng, sample_fn):
         rng, rng_sample = split(rng)
         while True:
-            yield train_sample_fn(rng_sample)
+            yield sample_fn(rng_sample)
             rng, rng_sample = split(rng)
 
     if cfg.train.prefetch > 0:
         exp.log(f"Using ACME prefetch {cfg.train.prefetch}")
         rng, rng_sampler = split(rng)
         train_input = acme_utils.prefetch(
-            iterator(rng_sampler), buffer_size=cfg.train.prefetch
+            iterator(rng_sampler, train_sample_fn), buffer_size=cfg.train.prefetch
         )
+        if cfg.train.method == "cl":
+            rng, rng_sampler = split(rng)
+            train_input_cl = acme_utils.prefetch(
+                iterator(rng_sampler, train_cl_sample_fn), buffer_size=cfg.train.prefetch
+            )
+
 
     if "zero" in cfg.train.reset_head:
         exp.log("Using Zeros to reset head")
@@ -477,15 +520,6 @@ if __name__ == "__main__":
             # train_method=cfg.train.reset_head,
             reset_fast_params_fn=reset_fast_params_fn_step,
         ),
-    )
-    fsl_build_ins = jit(
-        partial(
-            fsl_build,
-            batch_size=effective_batch_size,
-            way=cfg.train.way,
-            shot=cfg.train.shot,
-            qry_shot=cfg.train.qry_shot,
-        )
     )
 
     # Val data sampling
@@ -631,6 +665,21 @@ if __name__ == "__main__":
         x = jax.device_put(x, device)
         y = jax.device_put(y, device)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
+        if cfg.train.method == "cl":
+            rng_sample_cl, = split(rng_sample, 1)
+            if cfg.train.prefetch > 0:
+                x_cl, y_cl = next(train_input_cl)
+            else:
+                x_cl, y_cl = train_cl_sample_fn(rng_sample_cl)
+            x_cl = jax.device_put(x_cl, device)
+            y_cl = jax.device_put(y_cl, device)
+            _, _, x_cl_qry, y_cl_qry = cl_build_ins(x_cl, y_cl)
+            x_qry = jnp.concatenate((x_qry, x_cl_qry), 1)
+            y_qry = jnp.concatenate((y_qry, y_cl_qry), 1)
+
+            print(x_spt.shape, y_spt.shape)
+            print(x_qry.shape, y_qry.shape)
+            
         x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
         # x = x / 255
         # x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
