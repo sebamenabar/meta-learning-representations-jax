@@ -519,11 +519,18 @@ if __name__ == "__main__":
     test_sample_fn_5_w_1_s = partial(sample_fn, way=5, shot=1)
     test_sample_fn_5_w_5_s = partial(sample_fn, way=5, shot=5)
     # For MAML style test
+    if cfg.train.way > val_labels.shape[0]:
+        exp.log(
+            f"Training with {cfg.train.way}-way, but validation only has {val_labels.shape[0]} classes, reducing val way to {val_labels.shape[0]}"
+        )
+        val_way = val_labels.shape[0]
+    else:
+        val_way = cfg.train.way
     test_sample_fn_1_shot = partial(
-        fsl_sample, spt_shot=1, way=cfg.train.way, **test_sample_fn_kwargs,
+        fsl_sample, spt_shot=1, way=val_way, **test_sample_fn_kwargs,
     )
     test_sample_fn_5_shot = partial(
-        fsl_sample, spt_shot=5, way=cfg.train.way, **test_sample_fn_kwargs,
+        fsl_sample, spt_shot=5, way=val_way, **test_sample_fn_kwargs,
     )
     # Val loops
     test_inner_loop_ins = partial(
@@ -677,7 +684,7 @@ if __name__ == "__main__":
                 build_fn=partial(
                     fsl_build,
                     batch_size=cfg.val.fsl.batch_size,
-                    way=5,
+                    way=val_way,
                     shot=1,
                     qry_shot=15,
                 ),
@@ -693,7 +700,7 @@ if __name__ == "__main__":
                 build_fn=partial(
                     fsl_build,
                     batch_size=cfg.val.fsl.batch_size,
-                    way=5,
+                    way=val_way,
                     shot=5,
                     qry_shot=15,
                 ),
@@ -726,10 +733,10 @@ if __name__ == "__main__":
             exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
             exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
             exp.log(
-                f"{cfg.train.way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}"
+                f"{val_way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}"
             )
             exp.log(
-                f"{cfg.train.way}-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}"
+                f"{val_way}-way-5-shot acc: {fsl_maml_acc_5}, loss: {fsl_maml_loss_5}"
             )
 
             exp.log_metrics(
