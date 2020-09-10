@@ -552,7 +552,7 @@ if __name__ == "__main__":
         track_slow_state="none",
     )
     test_batched_outer_loop_ins = partial(
-        batched_outer_loop, outer_loop=test_outer_loop_ins, spt_classes=None,
+        batched_outer_loop, outer_loop=test_outer_loop_ins, bspt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     test_fn_ins = partial(
