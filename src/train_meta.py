@@ -93,8 +93,8 @@ def parse_args(parser=None):
     parser.add_argument(
         "--train.reset_head",
         type=str,
-        default="fsl",
-        choices=["fsl", "fsl-reset-zero", "fsl-reset-per-task"],
+        default="none",
+        choices=["none", "all-zero", "all-random", "cls-zero", "cls-random"],
     )
 
     parser.add_argument("--val.pool", type=int, default=4)
@@ -162,8 +162,13 @@ def step(
     inner_opt_init,
     outer_opt_update,
     batched_outer_loop_ins,
-    train_method=None,  # Just for compatibility
+    reset_fast_params_fn=None,
 ):
+    if reset_fast_params_fn:
+        rng, rng_reset = split(rng)
+        tree_flat, tree_struct = jax.tree_flatten(fast_params)
+        rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+        fast_params = jax.tree_multimap(partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params)
     inner_opt_state = inner_opt_init(fast_params)
 
     (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
@@ -267,6 +272,20 @@ def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_f
     x_qry = normalize_fn(x_qry)
 
     return x_spt, x_qry
+
+
+def reset_by_idxs(w_make_fn, idxs, rng, array):
+    print("Resetting head by indexes")
+    return jax.ops.index_update(
+        array,
+        jax.ops.index[:, idxs],
+        w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
+    )
+
+
+def reset_all(w_make_fn, idxs, rng, array):
+    print("Resetting all head")
+    return w_make_fn(dtype=array.dtype)(rng, array.shape)
 
 
 if __name__ == "__main__":
@@ -396,6 +415,21 @@ if __name__ == "__main__":
             iterator(rng_sampler), buffer_size=cfg.train.prefetch
         )
 
+    if "zero" in cfg.train.reset_head:
+        exp.log("Using Zeros to reset head")
+        head_initializer = lambda dtype: lambda rng, shape: jax.nn.initializers.zeros(
+            rng, shape, dtype=dtype,
+        )
+    elif "random" in cfg.train.reset_head:
+        if cfg.model.initializer == "glorot_uniform":
+            exp.log("Using Glorot Uniform to reset head")
+            head_initializer = jax.nn.initializers.glorot_uniform
+        elif cfg.model.initializer == "kaiming_normal":
+            exp.log("Using Kaiming Normal to reset head")
+            head_initializer = jax.nn.initializers.he_normal
+    else:
+        head_initializer = None
+
     train_inner_loop_ins = partial(
         fsl_inner_loop,
         is_training="inner" in cfg.model.track_stats,
@@ -405,6 +439,10 @@ if __name__ == "__main__":
         loss_fn=mean_xe_and_acc_dict,
         opt_update_fn=inner_opt.update,
     )
+    if "cls" in cfg.train.reset_head:
+        reset_fast_params_fn_outer = partial(reset_by_idxs, head_initializer)
+    else:
+        reset_fast_params_fn_outer = None
     train_outer_loop_ins = partial(
         outer_loop,
         is_training="outer" in cfg.model.track_stats,
@@ -412,25 +450,32 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
-        train_method=cfg.train.reset_head,
+        # train_method=cfg.train.reset_head,
         track_slow_state=cfg.model.track_stats,
+        reset_fast_params_fn=reset_fast_params_fn_outer,
     )
     train_batched_outer_loop_ins = partial(
         batched_outer_loop, outer_loop=train_outer_loop_ins
     )
-    if (cfg.train.reset_head == "fsl") or (
-        cfg.train.reset_head == "fsl-reset-per-task"
-    ):
-        step_ins = step
-    elif cfg.train.reset_head == "fsl-reset-zero":
-        step_ins = step_reset
+    # if (cfg.train.reset_head == "fsl") or (
+    #     cfg.train.reset_head == "fsl-reset-per-task"
+    # ):
+    #     step_ins = step
+    # elif cfg.train.reset_head == "fsl-reset-zero":
+    #     step_ins = step_reset
+    step_fn = step
+    if "all" in cfg.train.reset_head:
+        reset_fast_params_fn_step = partial(reset_all, head_initializer)
+    else:
+        reset_fast_params_fn_step = None
     step_ins = jit(
         partial(
-            step_ins,
+            step_fn,
             inner_opt_init=inner_opt.init,
             outer_opt_update=outer_opt.update,
             batched_outer_loop_ins=train_batched_outer_loop_ins,
-            train_method=cfg.train.reset_head,
+            # train_method=cfg.train.reset_head,
+            reset_fast_params_fn=reset_fast_params_fn_step,
         ),
     )
     fsl_build_ins = jit(
@@ -527,12 +572,13 @@ if __name__ == "__main__":
         rng_params, cfg.dataset, body.init, body.apply, head.init,
     )
 
-    if (cfg.train.reset_head == "fsl") or (
-        cfg.train.reset_head == "fsl-reset-per-task"
-    ):
-        outer_opt_state = outer_opt.init((slow_params, fast_params))
-    elif cfg.train.reset_head == "fsl-reset-zero":
-        outer_opt_state = outer_opt.init(slow_params)
+    # if (cfg.train.reset_head == "fsl") or (
+    #     cfg.train.reset_head == "fsl-reset-per-task"
+    # ):
+    #     outer_opt_state = outer_opt.init((slow_params, fast_params))
+    # elif cfg.train.reset_head == "fsl-reset-zero":
+    #     outer_opt_state = outer_opt.init(slow_params)
+    outer_opt_state = outer_opt.init((slow_params, fast_params))
 
     (slow_params, fast_params, slow_state, fast_state, outer_opt_state) = [
         jax.device_put(t, device)
@@ -614,12 +660,16 @@ if __name__ == "__main__":
             fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
             test_slow_state = tree_map(replicate_array_test, slow_state)
             test_fast_state = tree_map(replicate_array_test, fast_state)
+            rng, rng_reset = split(rng)
+            tree_flat, tree_struct = jax.tree_flatten(fast_params)
+            rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+            test_fast_params = jax.tree_multimap(partial(reset_all, head_initializer, None), rng_tree, fast_params)
             now = time.time()
             rng, rng_test_1, rng_test_5, rng_test_lr_1, rng_test_lr_5 = split(rng, 5)
             fsl_maml_1_res = test_fn_ins(
                 rng_test_1,
                 slow_params,
-                fast_params,
+                test_fast_params,
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
@@ -635,7 +685,7 @@ if __name__ == "__main__":
             fsl_maml_5_res = test_fn_ins(
                 rng_test_5,
                 slow_params,
-                fast_params,
+                test_fast_params,
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,

@@ -143,7 +143,7 @@ def batched_outer_loop(
     by_spt,
     bx_qry,
     by_qry,
-    spt_classes,
+    bspt_classes,
     outer_loop,
 ):
     def helper(slow_state, fast_state, *args):
@@ -159,7 +159,7 @@ def batched_outer_loop(
         by_spt,
         bx_qry,
         by_qry,
-        spt_classes,
+        bspt_classes,
     )
     return losses.mean(), aux
 
@@ -181,29 +181,15 @@ def outer_loop(
     slow_apply,
     fast_apply,
     loss_fn,
-    train_method=None,
+    reset_fast_params_fn=None,
     track_slow_state="none",
 ):
-    if train_method == "fsl-reset-per-task":
-        print("Resetting fast params per task")
-        fast_params = hk.data_structures.merge(
-            {
-                "mini_imagenet_cnn_head/linear": {
-                    "w": ops.index_update(
-                        fast_params["mini_imagenet_cnn_head/linear"]["w"],
-                        ops.index[:, spt_classes],
-                        jnp.zeros(
-                            (
-                                fast_params["mini_imagenet_cnn_head/linear"]["w"].shape[
-                                    0
-                                ],
-                                spt_classes.shape[0],
-                            )
-                        ),
-                    )
-                }
-            }
-        )
+    if reset_fast_params_fn:
+        rng, rng_reset = split(rng)
+        tree_flat, tree_struct = jax.tree_flatten(fast_params)
+        rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+        fast_params = jax.tree_multimap(partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params)
+
     _fast_apply_and_loss_fn = partial(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
