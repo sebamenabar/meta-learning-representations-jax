@@ -24,7 +24,6 @@ from jax import (
 
 import optax as ox
 import haiku as hk
-from acme.jax import utils as acme_utils
 
 from config import rsetattr
 from lib import (
@@ -67,7 +66,7 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=10,
     )
-    parser.add_argument("--train.cl.qry_way", default=1, type=int)
+    parser.add_argument("--train.cl.qry_way", default=64, type=int)
     parser.add_argument("--train.cl.qry_shot", default=1, type=int)
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
@@ -448,7 +447,7 @@ if __name__ == "__main__":
                 batch_size=effective_batch_size,
                 way=cfg.train.cl.qry_way,
                 shot=0,
-                qry_shot=cfg.train.qry_shot,
+                qry_shot=cfg.train.cl.qry_shot,
             )
         )
 
@@ -459,6 +458,8 @@ if __name__ == "__main__":
             rng, rng_sample = split(rng)
 
     if cfg.train.prefetch > 0:
+        # Move here because I cannot install it on local computer
+        from acme.jax import utils as acme_utils
         exp.log(f"Using ACME prefetch {cfg.train.prefetch}")
         rng, rng_sampler = split(rng)
         train_input = acme_utils.prefetch(
@@ -703,9 +704,6 @@ if __name__ == "__main__":
             _, _, x_cl_qry, y_cl_qry = cl_build_ins(x_cl, y_cl)
             x_qry = jnp.concatenate((x_qry, x_cl_qry), 1)
             y_qry = jnp.concatenate((y_qry, y_cl_qry), 1)
-
-            print(x_spt.shape, y_spt.shape)
-            print(x_qry.shape, y_qry.shape)
 
         x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
         # x = x / 255

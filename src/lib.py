@@ -220,6 +220,7 @@ def outer_loop(
         y_spt,
     )
     if "inner" in track_slow_state:
+        print("Using inner statistics")
         slow_state = inner_slow_state
     initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
         fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,

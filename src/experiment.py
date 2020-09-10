@@ -69,7 +69,7 @@ class Experiment:
     def logfile_init(self, backends=None):
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         self.logging = Logger(self.logfile, backends)
-        atexit.register(self.logfile.close)
+        # atexit.register(self.logfile.close)
         self.log(f"Experiment directory: {self.exp_dir}")
         self.log("\nCLI arguments")
         self.log(pp.pformat(vars(self.args)))
@@ -175,7 +175,7 @@ class Experiment:
             _run_name = now
         debug_str = "debug" if self.cfg.debug else ""
         _exp_dir = osp.join(
-            self.work_dir, "experiments", debug_str, now_str, log_dir, _run_name
+            self.work_dir, "experiments", debug_str, f"{now_str}-{log_dir}", _run_name
         )
         exp_dir = _exp_dir
 
