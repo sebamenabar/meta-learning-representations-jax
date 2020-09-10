@@ -67,12 +67,8 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=10,
     )
-    parser.add_argument(
-        "--train.cl.qry_way", default=1, type=int
-    )
-    parser.add_argument(
-        "--train.cl.qry_shot", default=1, type=int
-    )
+    parser.add_argument("--train.cl.qry_way", default=1, type=int)
+    parser.add_argument("--train.cl.qry_shot", default=1, type=int)
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
@@ -135,7 +131,7 @@ def parse_args(parser=None):
         "--model.normalize",
         default="bn",
         type=str,
-        choices=["bn", "gn", "in", "ln", "none"],
+        choices=["bn", "gn", "in", "ln", "custom", "none"],
     )
     parser.add_argument(
         "--model.track_stats",
@@ -174,7 +170,9 @@ def step(
         rng, rng_reset = split(rng)
         tree_flat, tree_struct = jax.tree_flatten(fast_params)
         rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
-        fast_params = jax.tree_multimap(partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params)
+        fast_params = jax.tree_multimap(
+            partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params
+        )
     inner_opt_state = inner_opt_init(fast_params)
 
     (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
@@ -249,7 +247,11 @@ def step_reset(
         y_qry,
         spt_classes,
     )
-    updates, outer_opt_state = outer_opt_update(grads, outer_opt_state, slow_params,)
+    updates, outer_opt_state = outer_opt_update(
+        grads,
+        outer_opt_state,
+        slow_params,
+    )
     slow_params = ox.apply_updates(slow_params, updates)
 
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
@@ -335,7 +337,10 @@ if __name__ == "__main__":
     )
     val_images, _val_labels, _ = prepare_data(
         cfg.dataset,
-        osp.join(cfg.data_dir, "miniImageNet_category_split_val_ordered.pickle",),
+        osp.join(
+            cfg.data_dir,
+            "miniImageNet_category_split_val_ordered.pickle",
+        ),
         device,
     )
     val_labels = (
@@ -344,7 +349,9 @@ if __name__ == "__main__":
 
     exp.log("Train data:", train_images.shape, train_labels.shape)
     exp.log(
-        "Validation data:", val_images.shape, val_images.shape,
+        "Validation data:",
+        val_images.shape,
+        val_images.shape,
     )
 
     # Model
@@ -406,7 +413,10 @@ if __name__ == "__main__":
         "shuffled_labels": cfg.train.method == "fsl",
         "disjoint": False,  # tasks can share classes
     }
-    train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
+    train_sample_fn = partial(
+        fsl_sample,
+        **train_sample_fn_kwargs,
+    )
     fsl_build_ins = jit(
         partial(
             fsl_build,
@@ -428,7 +438,10 @@ if __name__ == "__main__":
             "shuffled_labels": False,
             "disjoint": False,  # tasks can share classes
         }
-        train_cl_sample_fn = partial(fsl_sample, **train_cl_sample_fn_kwargs,)
+        train_cl_sample_fn = partial(
+            fsl_sample,
+            **train_cl_sample_fn_kwargs,
+        )
         cl_build_ins = jit(
             partial(
                 fsl_build,
@@ -454,14 +467,16 @@ if __name__ == "__main__":
         if cfg.train.method == "cl":
             rng, rng_sampler = split(rng)
             train_input_cl = acme_utils.prefetch(
-                iterator(rng_sampler, train_cl_sample_fn), buffer_size=cfg.train.prefetch
+                iterator(rng_sampler, train_cl_sample_fn),
+                buffer_size=cfg.train.prefetch,
             )
-
 
     if "zero" in cfg.train.reset_head:
         exp.log("Using Zeros to reset head")
         head_initializer = lambda dtype: lambda rng, shape: jax.nn.initializers.zeros(
-            rng, shape, dtype=dtype,
+            rng,
+            shape,
+            dtype=dtype,
         )
     elif "random" in cfg.train.reset_head:
         if cfg.model.initializer == "glorot_uniform":
@@ -561,10 +576,16 @@ if __name__ == "__main__":
     else:
         val_way = cfg.train.way
     test_sample_fn_1_shot = partial(
-        fsl_sample, spt_shot=1, way=val_way, **test_sample_fn_kwargs,
+        fsl_sample,
+        spt_shot=1,
+        way=val_way,
+        **test_sample_fn_kwargs,
     )
     test_sample_fn_5_shot = partial(
-        fsl_sample, spt_shot=5, way=val_way, **test_sample_fn_kwargs,
+        fsl_sample,
+        spt_shot=5,
+        way=val_way,
+        **test_sample_fn_kwargs,
     )
     # Val loops
     test_inner_loop_ins = partial(
@@ -586,7 +607,9 @@ if __name__ == "__main__":
         track_slow_state="none",
     )
     test_batched_outer_loop_ins = partial(
-        batched_outer_loop, outer_loop=test_outer_loop_ins, bspt_classes=None,
+        batched_outer_loop,
+        outer_loop=test_outer_loop_ins,
+        bspt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     test_fn_ins = partial(
@@ -610,7 +633,11 @@ if __name__ == "__main__":
 
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng_params, cfg.dataset, body.init, body.apply, head.init,
+        rng_params,
+        cfg.dataset,
+        body.init,
+        body.apply,
+        head.init,
     )
 
     # if (cfg.train.reset_head == "fsl") or (
@@ -666,7 +693,7 @@ if __name__ == "__main__":
         y = jax.device_put(y, device)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
         if cfg.train.method == "cl":
-            rng_sample_cl, = split(rng_sample, 1)
+            (rng_sample_cl,) = split(rng_sample, 1)
             if cfg.train.prefetch > 0:
                 x_cl, y_cl = next(train_input_cl)
             else:
@@ -679,7 +706,7 @@ if __name__ == "__main__":
 
             print(x_spt.shape, y_spt.shape)
             print(x_qry.shape, y_qry.shape)
-            
+
         x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
         # x = x / 255
         # x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
@@ -719,7 +746,9 @@ if __name__ == "__main__":
             rng, rng_reset = split(rng)
             tree_flat, tree_struct = jax.tree_flatten(fast_params)
             rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
-            test_fast_params = jax.tree_multimap(partial(reset_all, head_initializer, None), rng_tree, fast_params)
+            test_fast_params = jax.tree_multimap(
+                partial(reset_all, head_initializer, None), rng_tree, fast_params
+            )
             now = time.time()
             rng, rng_test_1, rng_test_5, rng_test_lr_1, rng_test_lr_5 = split(rng, 5)
             fsl_maml_1_res = test_fn_ins(
@@ -837,7 +866,10 @@ if __name__ == "__main__":
             train_loss = info["outer"]["final"]["loss"].mean()
             train_final_outer_acc = info["outer"]["final"]["aux"][0]["acc"].mean()
             exp.log_metrics(
-                {"foa": train_final_outer_acc, "loss": train_loss,},
+                {
+                    "foa": train_final_outer_acc,
+                    "loss": train_loss,
+                },
                 step=counter,
                 prefix="train",
             )
