@@ -69,7 +69,7 @@ class Experiment:
     def logfile_init(self, backends=None):
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         self.logging = Logger(self.logfile, backends)
-        # atexit.register(self.logfile.close)
+        atexit.register(self.logfile.close)
         self.log(f"Experiment directory: {self.exp_dir}")
         self.log("\nCLI arguments")
         self.log(pp.pformat(vars(self.args)))
@@ -82,6 +82,7 @@ class Experiment:
 
     def log(self, *args, **kwargs):
         return print(*args, file=self.logging, **kwargs)
+        # return print(*args, **kwargs)
 
     @staticmethod
     def add_args(parser=None):

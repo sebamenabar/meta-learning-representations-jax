@@ -737,6 +737,7 @@ if __name__ == "__main__":
             ((i % cfg.train.apply_every) == 0)
             and ((counter) % cfg.train.val_interval) == 0
         ):
+            exp.log("Evaluating MAML")
             slow_state = jax.tree_map(lambda xs: xs[0], replicated_slow_state)
             fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
             test_slow_state = tree_map(replicate_array_test, slow_state)
@@ -782,6 +783,7 @@ if __name__ == "__main__":
                 ),
             )
 
+            exp.log("Fitting Multinomial Regression")
             fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
                 rng_test_lr_1,
                 partial(embeddings_fn, slow_params, slow_state),
