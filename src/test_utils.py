@@ -75,7 +75,7 @@ def test_fsl_embeddings(
     is_norm=True,
     device=None,
     pool=0,
-    n_jobs=2,
+    n_jobs=None,
 ):
 
     if pool > 0:
@@ -133,7 +133,7 @@ def test_fsl_embeddings(
     return preds, targets
 
 
-def lr_fit_eval(X, y, X_test, n_jobs=1, predict_train=False):
+def lr_fit_eval(X, y, X_test, n_jobs=None, predict_train=False):
     clf = LogisticRegression(
         penalty="l2",
         random_state=0,
