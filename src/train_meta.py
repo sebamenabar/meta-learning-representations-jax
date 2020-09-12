@@ -14,6 +14,7 @@ import jax
 from jax.random import split
 from jax import (
     jit,
+    pmap,
     vmap,
     random,
     partial,
@@ -48,7 +49,8 @@ def parse_args(parser=None):
     parser = Experiment.add_args(parser)
     # parser = miniimagenet_cnn_argparse(parser)
     # Training arguments
-    parser.add_argument("--pool", type=int, default=0)
+    parser.add_argument("--pool_lr", type=int, default=0)
+    # parser.add_argument("--n_jobs_lr", type=int, default=None)
 
     parser.add_argument("--train.num_outer_steps", type=int, default=30000)
     parser.add_argument(
@@ -98,7 +100,7 @@ def parse_args(parser=None):
         choices=["none", "all-zero", "all-random", "cls-zero", "cls-random"],
     )
 
-    parser.add_argument("--val.pool", type=int, default=4)
+    # parser.add_argument("--val.pool", type=int, default=4)
     parser.add_argument(
         "--val.fsl.batch_size", help="Number of FSL tasks", default=25, type=int
     )
@@ -164,7 +166,11 @@ def step(
     outer_opt_update,
     batched_outer_loop_ins,
     reset_fast_params_fn=None,
+    preprocess_images_fn=None,
 ):
+    rng, rng_preprocess = split(rng)
+    if preprocess_images_fn:
+        x_spt, x_qry = preprocess_images_fn(rng_preprocess, x_spt, x_qry)
     if reset_fast_params_fn:
         rng, rng_reset = split(rng)
         tree_flat, tree_struct = jax.tree_flatten(fast_params)
@@ -189,6 +195,7 @@ def step(
         y_qry,
         spt_classes,
     )
+    grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
     updates, outer_opt_state = outer_opt_update(
         grads, outer_opt_state, (slow_params, fast_params)
     )
@@ -246,11 +253,7 @@ def step_reset(
         y_qry,
         spt_classes,
     )
-    updates, outer_opt_state = outer_opt_update(
-        grads,
-        outer_opt_state,
-        slow_params,
-    )
+    updates, outer_opt_state = outer_opt_update(grads, outer_opt_state, slow_params,)
     slow_params = ox.apply_updates(slow_params, updates)
 
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
@@ -316,14 +319,17 @@ if __name__ == "__main__":
     jit_enabled = not cfg.disable_jit
     # Temporarily hard-code default default_platform as cpu
     # it recommended for any big (bigger than omniglot) dataset
-    cpu, device = setup_device(cfg.gpus, default_platform="cpu")
+    # cpu, device = setup_device(cfg.gpus, default_platform="cpu")
     rng = random.PRNGKey(cfg.seed)  # Default seed is 0
-    exp.log(f"Running on {device} with seed: {cfg.seed}")
+    # exp.log(f"Running on {device} with seed: {cfg.seed}")
     exp.log(f"JAX available CPUS {jax.devices('cpu')}")
     try:
         exp.log(f"JAX available GPUS {jax.devices('gpu')}")
     except RuntimeError:
         pass
+    num_devices = max(cfg.gpus, 1)
+    exp.log(f"Using {num_devices} devices")
+    cpu = jax.devices("cpu")[0]
 
     # Data
     train_images, train_labels, normalize_fn = prepare_data(
@@ -332,15 +338,12 @@ if __name__ == "__main__":
             cfg.data_dir,
             "miniImageNet_category_split_train_phase_train_ordered.pickle",
         ),
-        device,
+        # device,
     )
     val_images, _val_labels, _ = prepare_data(
         cfg.dataset,
-        osp.join(
-            cfg.data_dir,
-            "miniImageNet_category_split_val_ordered.pickle",
-        ),
-        device,
+        osp.join(cfg.data_dir, "miniImageNet_category_split_val_ordered.pickle",),
+        # device,
     )
     val_labels = (
         _val_labels - 64
@@ -348,9 +351,7 @@ if __name__ == "__main__":
 
     exp.log("Train data:", train_images.shape, train_labels.shape)
     exp.log(
-        "Validation data:",
-        val_images.shape,
-        val_images.shape,
+        "Validation data:", val_images.shape, val_images.shape,
     )
 
     # Model
@@ -380,6 +381,13 @@ if __name__ == "__main__":
             f"apply_every {cfg.train.apply_every}"
         )
     exp.log(f"Effective batch size: {effective_batch_size}")
+    per_device_batch_size, ragged = divmod(effective_batch_size, num_devices)
+    if ragged:
+        raise ValueError(
+            f"Effective batch size {effective_batch_size} must be divisible by "
+            f"num devices {num_devices}"
+        )
+    exp.log(f"Per device batch size: {per_device_batch_size}")
 
     # Optimizers
     inner_opt = ox.sgd(cfg.train.inner_lr)
@@ -412,10 +420,7 @@ if __name__ == "__main__":
         "shuffled_labels": cfg.train.method == "fsl",
         "disjoint": False,  # tasks can share classes
     }
-    train_sample_fn = partial(
-        fsl_sample,
-        **train_sample_fn_kwargs,
-    )
+    train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
     fsl_build_ins = jit(
         partial(
             fsl_build,
@@ -437,10 +442,7 @@ if __name__ == "__main__":
             "shuffled_labels": False,
             "disjoint": False,  # tasks can share classes
         }
-        train_cl_sample_fn = partial(
-            fsl_sample,
-            **train_cl_sample_fn_kwargs,
-        )
+        train_cl_sample_fn = partial(fsl_sample, **train_cl_sample_fn_kwargs,)
         cl_build_ins = jit(
             partial(
                 fsl_build,
@@ -460,6 +462,7 @@ if __name__ == "__main__":
     if cfg.train.prefetch > 0:
         # Move here because I cannot install it on local computer
         from acme.jax import utils as acme_utils
+
         exp.log(f"Using ACME prefetch {cfg.train.prefetch}")
         rng, rng_sampler = split(rng)
         train_input = acme_utils.prefetch(
@@ -475,9 +478,7 @@ if __name__ == "__main__":
     if "zero" in cfg.train.reset_head:
         exp.log("Using Zeros to reset head")
         head_initializer = lambda dtype: lambda rng, shape: jax.nn.initializers.zeros(
-            rng,
-            shape,
-            dtype=dtype,
+            rng, shape, dtype=dtype,
         )
     elif "random" in cfg.train.reset_head:
         if cfg.model.initializer == "glorot_uniform":
@@ -527,7 +528,7 @@ if __name__ == "__main__":
         reset_fast_params_fn_step = partial(reset_all, head_initializer)
     else:
         reset_fast_params_fn_step = None
-    step_ins = jit(
+    step_pins = pmap(
         partial(
             step_fn,
             inner_opt_init=inner_opt.init,
@@ -535,7 +536,14 @@ if __name__ == "__main__":
             batched_outer_loop_ins=train_batched_outer_loop_ins,
             # train_method=cfg.train.reset_head,
             reset_fast_params_fn=reset_fast_params_fn_step,
+            preprocess_images_fn=partial(
+                preprocess_images,
+                normalize_fn=normalize_fn,
+                augment=cfg.train.augment,
+                augment_fn=augment_fn,
+            ),
         ),
+        axis_name="i",
     )
 
     # Val data sampling
@@ -557,8 +565,8 @@ if __name__ == "__main__":
     def sample_fn(rng, way, shot):
         rng_sample, rng_augment = split(rng)
         x, y = fsl_sample(rng_sample, way=way, spt_shot=shot, **test_sample_fn_kwargs)
-        x = jax.device_put(x, device)
-        y = jax.device_put(y, device)
+        x = jax.device_put(x, jax.devices()[0])
+        y = jax.device_put(y, jax.devices()[0])
         x_spt, y_spt, x_qry, y_qry = fsl_build(
             x, y, batch_size=cfg.val.fsl.batch_size, way=way, shot=shot, qry_shot=15
         )
@@ -577,16 +585,10 @@ if __name__ == "__main__":
     else:
         val_way = cfg.train.way
     test_sample_fn_1_shot = partial(
-        fsl_sample,
-        spt_shot=1,
-        way=val_way,
-        **test_sample_fn_kwargs,
+        fsl_sample, spt_shot=1, way=val_way, **test_sample_fn_kwargs,
     )
     test_sample_fn_5_shot = partial(
-        fsl_sample,
-        spt_shot=5,
-        way=val_way,
-        **test_sample_fn_kwargs,
+        fsl_sample, spt_shot=5, way=val_way, **test_sample_fn_kwargs,
     )
     # Val loops
     test_inner_loop_ins = partial(
@@ -608,9 +610,7 @@ if __name__ == "__main__":
         track_slow_state="none",
     )
     test_batched_outer_loop_ins = partial(
-        batched_outer_loop,
-        outer_loop=test_outer_loop_ins,
-        bspt_classes=None,
+        batched_outer_loop, outer_loop=test_outer_loop_ins, bspt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     test_fn_ins = partial(
@@ -629,16 +629,12 @@ if __name__ == "__main__":
         #     )
         # ),
         augment_fn=None,
-        device=device,
+        device=jax.devices()[0],
     )
 
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng_params,
-        cfg.dataset,
-        body.init,
-        body.apply,
-        head.init,
+        rng_params, cfg.dataset, body.init, body.apply, head.init,
     )
 
     # if (cfg.train.reset_head == "fsl") or (
@@ -649,16 +645,35 @@ if __name__ == "__main__":
     #     outer_opt_state = outer_opt.init(slow_params)
     outer_opt_state = outer_opt.init((slow_params, fast_params))
 
-    (slow_params, fast_params, slow_state, fast_state, outer_opt_state) = [
-        jax.device_put(t, device)
-        for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
-    ]
-    replicate_array = lambda x: jnp.broadcast_to(x, (effective_batch_size,) + x.shape)
+    # (slow_params, fast_params, slow_state, fast_state, outer_opt_state) = [
+    #     jax.device_put(t, device)
+    #     for t in (slow_params, fast_params, slow_state, fast_state, outer_opt_state)
+    # ]
+    replicate_array = lambda x: jnp.broadcast_to(x, (num_devices,) + x.shape)
     replicate_array_test = lambda x: jnp.broadcast_to(
         x, (cfg.val.fsl.batch_size,) + x.shape
     )
-    replicated_slow_state, replicated_fast_state = tree_map(
-        replicate_array, (slow_state, fast_state)
+    (
+        rep_slow_params,
+        rep_fast_params,
+        rep_outer_opt_state,
+    ) = tree_map(
+        replicate_array,
+        (
+            slow_params,
+            fast_params,
+            outer_opt_state,
+        ),
+    )
+    (
+        rep_slow_state,
+        rep_fast_state,
+    ) = tree_map(
+        lambda x: jnp.broadcast_to(x, (num_devices, per_device_batch_size) + x.shape),
+        (
+            slow_state,
+            fast_state,
+        ),
     )
 
     # augment = jit(augment)
@@ -677,6 +692,7 @@ if __name__ == "__main__":
         miniters=25,
         mininterval=10,
         maxinterval=30,
+        ncols=0,
     )
     best_val_acc = 0.0
     counter = 0
@@ -690,8 +706,8 @@ if __name__ == "__main__":
             x, y = next(train_input)
         else:
             x, y = train_sample_fn(rng_sample)
-        x = jax.device_put(x, device)
-        y = jax.device_put(y, device)
+        # x = jax.device_put(x, device)
+        # y = jax.device_put(y, device)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
         if cfg.train.method == "cl":
             (rng_sample_cl,) = split(rng_sample, 1)
@@ -699,33 +715,40 @@ if __name__ == "__main__":
                 x_cl, y_cl = next(train_input_cl)
             else:
                 x_cl, y_cl = train_cl_sample_fn(rng_sample_cl)
-            x_cl = jax.device_put(x_cl, device)
-            y_cl = jax.device_put(y_cl, device)
+            # x_cl = jax.device_put(x_cl, device)
+            # y_cl = jax.device_put(y_cl, device)
             _, _, x_cl_qry, y_cl_qry = cl_build_ins(x_cl, y_cl)
-            x_qry = jnp.concatenate((x_qry, x_cl_qry), 1)
-            y_qry = jnp.concatenate((y_qry, y_cl_qry), 1)
+            x_qry = onp.concatenate((x_qry, x_cl_qry), 1)
+            y_qry = onp.concatenate((y_qry, y_cl_qry), 1)
 
-        x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
+        spt_classes = onp.unique(y_spt, axis=1)
+        # x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
+        x_spt = x_spt.reshape(num_devices, per_device_batch_size, *x_spt.shape[1:])
+        x_qry = x_qry.reshape(num_devices, per_device_batch_size, *x_qry.shape[1:])
+        y_spt = y_spt.reshape(num_devices, per_device_batch_size, *y_spt.shape[1:])
+        y_qry = y_qry.reshape(num_devices, per_device_batch_size, *y_qry.shape[1:])
+        spt_classes = spt_classes.reshape(
+            num_devices, per_device_batch_size, *spt_classes.shape[1:]
+        )
         # x = x / 255
         # x = augment(rng, flatten(x, (0, 2))).reshape(*x.shape)
         # x = normalize_fn(x)
 
-        spt_classes = jax.device_put(onp.unique(y_spt, axis=1), device)
         (
-            outer_opt_state,
-            slow_params,
-            fast_params,
-            replicated_slow_state,
-            replicated_fast_state,
+            rep_outer_opt_state,
+            rep_slow_params,
+            rep_fast_params,
+            rep_slow_state,
+            rep_fast_state,
             info,
-        ) = step_ins(
-            rng_step,
-            counter,
-            outer_opt_state,
-            slow_params,
-            fast_params,
-            replicated_slow_state,
-            replicated_fast_state,
+        ) = step_pins(
+            split(rng_step, num_devices),
+            tree_map(replicate_array, jnp.array(i)),
+            rep_outer_opt_state,
+            rep_slow_params,
+            rep_fast_params,
+            rep_slow_state,
+            rep_fast_state,
             x_spt,
             y_spt,
             x_qry,
@@ -737,14 +760,16 @@ if __name__ == "__main__":
             ((i % cfg.train.apply_every) == 0)
             and ((counter) % cfg.train.val_interval) == 0
         ):
-            exp.log("Evaluating MAML")
-            slow_state = jax.tree_map(lambda xs: xs[0], replicated_slow_state)
-            fast_state = jax.tree_map(lambda xs: xs[0], replicated_fast_state)
+            exp.log("\nEvaluating MAML")
+            slow_state = jax.tree_map(lambda xs: xs[0, 0], rep_slow_state)
+            fast_state = jax.tree_map(lambda xs: xs[0, 0], rep_fast_state)
             test_slow_state = tree_map(replicate_array_test, slow_state)
             test_fast_state = tree_map(replicate_array_test, fast_state)
             rng, rng_reset = split(rng)
             tree_flat, tree_struct = jax.tree_flatten(fast_params)
             rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+            slow_params = jax.tree_map(lambda xs: xs[0], rep_slow_params)
+            fast_params = jax.tree_map(lambda xs: xs[0], rep_fast_params)
             test_fast_params = jax.tree_multimap(
                 partial(reset_all, head_initializer, None), rng_tree, fast_params
             )
@@ -789,14 +814,16 @@ if __name__ == "__main__":
                 partial(embeddings_fn, slow_params, slow_state),
                 test_sample_fn_5_w_1_s,
                 cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                pool=cfg.pool,
+                pool=cfg.pool_lr,
+                # n_jobs=cfg.n_jobs_lr,
             )
             fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
                 rng_test_lr_5,
                 partial(embeddings_fn, slow_params, slow_state),
                 test_sample_fn_5_w_5_s,
                 cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                pool=cfg.pool,
+                pool=cfg.pool_lr,
+                # n_jobs=cfg.n_jobs_lr,
             )
 
             fsl_maml_loss_1 = fsl_maml_1_res[0].mean()
@@ -866,10 +893,7 @@ if __name__ == "__main__":
             train_loss = info["outer"]["final"]["loss"].mean()
             train_final_outer_acc = info["outer"]["final"]["aux"][0]["acc"].mean()
             exp.log_metrics(
-                {
-                    "foa": train_final_outer_acc,
-                    "loss": train_loss,
-                },
+                {"foa": train_final_outer_acc, "loss": train_loss,},
                 step=counter,
                 prefix="train",
             )
