@@ -38,6 +38,7 @@ from lib import (
 from models.activations import activations
 from test_utils import SupervisedStandardTester, SupervisedCosineTester
 from data import augment
+
 # import utils.augmentations as augmentations
 
 
@@ -85,7 +86,10 @@ def parse_args():
     parser.add_argument("--model.hidden_size", default=32, type=int)
     parser.add_argument("--model.no_track_bn_stats", default=False, action="store_true")
     parser.add_argument(
-        "--model.activation", type=str, default="relu", choices=list(activations.keys())
+        "--model.activation",
+        type=str,
+        default="leaky_relu",
+        choices=list(activations.keys()),
     )
 
     # FSL evaluation arguments
@@ -182,17 +186,18 @@ if __name__ == "__main__":
     # output_size = sup_train_images.shape[0]
     output_size = 64
     body, head = prepare_model(
-        cfg.model.model_name,
+        cfg.model.name,
         cfg.dataset,
         output_size,
         avg_pool=True,
+        activation=cfg.model.activation,
         initializer="kaiming_normal",
         track_stats=not cfg.model.no_track_bn_stats,
         head_bias=True,
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng, cfg.dataset, body.init, body.apply, head.init, device,
+        rng, cfg.dataset, body.init, body.apply, head.init,
     )
     params = (slow_params, fast_params)
     state = (slow_state, fast_state)
