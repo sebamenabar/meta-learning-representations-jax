@@ -40,7 +40,8 @@ from lib import (
 from data import prepare_data, augment as augment_fn
 from experiment import Experiment, Logger
 from data.sampling import fsl_sample, fsl_build, BatchSampler
-from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
+# from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
+from models import make_params, prepare_model
 from test_utils import test_fsl_maml, test_fsl_embeddings
 from test_sup import test_sup_cosine
 
@@ -113,8 +114,9 @@ def parse_args(parser=None):
     parser.add_argument("--val.fsl.num_inner_steps", type=int, default=10)
     parser.add_argument("--val.fsl.num_tasks", type=int, default=600)
 
+    parser.add_argument("--model.name", choices=["resnet12", "convnet4"])
     parser.add_argument("--model.output_size", type=int)
-    parser.add_argument("--model.hidden_size", default=32, type=int)
+    parser.add_argument("--model.hidden_size", default=0, type=int)
     parser.add_argument("--model.activation", default="relu", type=str)
     parser.add_argument(
         "--model.initializer",
@@ -253,7 +255,11 @@ def step_reset(
         y_qry,
         spt_classes,
     )
-    updates, outer_opt_state = outer_opt_update(grads, outer_opt_state, slow_params,)
+    updates, outer_opt_state = outer_opt_update(
+        grads,
+        outer_opt_state,
+        slow_params,
+    )
     slow_params = ox.apply_updates(slow_params, updates)
 
     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
@@ -342,7 +348,10 @@ if __name__ == "__main__":
     )
     val_images, _val_labels, _ = prepare_data(
         cfg.dataset,
-        osp.join(cfg.data_dir, "miniImageNet_category_split_val_ordered.pickle",),
+        osp.join(
+            cfg.data_dir,
+            "miniImageNet_category_split_val_ordered.pickle",
+        ),
         # device,
     )
     val_labels = (
@@ -351,16 +360,19 @@ if __name__ == "__main__":
 
     exp.log("Train data:", train_images.shape, train_labels.shape)
     exp.log(
-        "Validation data:", val_images.shape, val_images.shape,
+        "Validation data:",
+        val_images.shape,
+        val_images.shape,
     )
 
     # Model
 
     body, head = prepare_model(
+        cfg.model.name,
         cfg.dataset,
         cfg.model.output_size,
-        cfg.model.hidden_size,
-        cfg.model.activation,
+        hidden_size=cfg.model.hidden_size,
+        activation=cfg.model.activation,
         track_stats=cfg.model.track_stats != "none",
         initializer=cfg.model.initializer,
         avg_pool=cfg.model.avg_pool,
@@ -420,7 +432,10 @@ if __name__ == "__main__":
         "shuffled_labels": cfg.train.method == "fsl",
         "disjoint": False,  # tasks can share classes
     }
-    train_sample_fn = partial(fsl_sample, **train_sample_fn_kwargs,)
+    train_sample_fn = partial(
+        fsl_sample,
+        **train_sample_fn_kwargs,
+    )
     fsl_build_ins = jit(
         partial(
             fsl_build,
@@ -442,7 +457,10 @@ if __name__ == "__main__":
             "shuffled_labels": False,
             "disjoint": False,  # tasks can share classes
         }
-        train_cl_sample_fn = partial(fsl_sample, **train_cl_sample_fn_kwargs,)
+        train_cl_sample_fn = partial(
+            fsl_sample,
+            **train_cl_sample_fn_kwargs,
+        )
         cl_build_ins = jit(
             partial(
                 fsl_build,
@@ -478,7 +496,9 @@ if __name__ == "__main__":
     if "zero" in cfg.train.reset_head:
         exp.log("Using Zeros to reset head")
         head_initializer = lambda dtype: lambda rng, shape: jax.nn.initializers.zeros(
-            rng, shape, dtype=dtype,
+            rng,
+            shape,
+            dtype=dtype,
         )
     elif "random" in cfg.train.reset_head:
         if cfg.model.initializer == "glorot_uniform":
@@ -585,10 +605,16 @@ if __name__ == "__main__":
     else:
         val_way = cfg.train.way
     test_sample_fn_1_shot = partial(
-        fsl_sample, spt_shot=1, way=val_way, **test_sample_fn_kwargs,
+        fsl_sample,
+        spt_shot=1,
+        way=val_way,
+        **test_sample_fn_kwargs,
     )
     test_sample_fn_5_shot = partial(
-        fsl_sample, spt_shot=5, way=val_way, **test_sample_fn_kwargs,
+        fsl_sample,
+        spt_shot=5,
+        way=val_way,
+        **test_sample_fn_kwargs,
     )
     # Val loops
     test_inner_loop_ins = partial(
@@ -610,7 +636,9 @@ if __name__ == "__main__":
         track_slow_state="none",
     )
     test_batched_outer_loop_ins = partial(
-        batched_outer_loop, outer_loop=test_outer_loop_ins, bspt_classes=None,
+        batched_outer_loop,
+        outer_loop=test_outer_loop_ins,
+        bspt_classes=None,
     )
     test_batched_outer_loop_ins = jit(test_batched_outer_loop_ins)
     test_fn_ins = partial(
@@ -634,7 +662,11 @@ if __name__ == "__main__":
 
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng_params, cfg.dataset, body.init, body.apply, head.init,
+        rng_params,
+        cfg.dataset,
+        body.init,
+        body.apply,
+        head.init,
     )
 
     # if (cfg.train.reset_head == "fsl") or (
@@ -653,11 +685,7 @@ if __name__ == "__main__":
     replicate_array_test = lambda x: jnp.broadcast_to(
         x, (cfg.val.fsl.batch_size,) + x.shape
     )
-    (
-        rep_slow_params,
-        rep_fast_params,
-        rep_outer_opt_state,
-    ) = tree_map(
+    (rep_slow_params, rep_fast_params, rep_outer_opt_state,) = tree_map(
         replicate_array,
         (
             slow_params,
@@ -665,10 +693,7 @@ if __name__ == "__main__":
             outer_opt_state,
         ),
     )
-    (
-        rep_slow_state,
-        rep_fast_state,
-    ) = tree_map(
+    (rep_slow_state, rep_fast_state,) = tree_map(
         lambda x: jnp.broadcast_to(x, (num_devices, per_device_batch_size) + x.shape),
         (
             slow_state,
@@ -893,7 +918,10 @@ if __name__ == "__main__":
             train_loss = info["outer"]["final"]["loss"].mean()
             train_final_outer_acc = info["outer"]["final"]["aux"][0]["acc"].mean()
             exp.log_metrics(
-                {"foa": train_final_outer_acc, "loss": train_loss,},
+                {
+                    "foa": train_final_outer_acc,
+                    "loss": train_loss,
+                },
                 step=counter,
                 prefix="train",
             )
