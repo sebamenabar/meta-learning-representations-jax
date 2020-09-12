@@ -6,8 +6,8 @@ from lib import flatten
 
 
 def shuffle_along_axis(rng, a, axis):
-    idx = random.uniform(rng, a.shape).argsort(axis=axis)
-    return jnp.take_along_axis(a, idx, axis=axis)
+    idx = onp.array(random.uniform(rng, a.shape).argsort(axis=axis))
+    return onp.take_along_axis(a, idx, axis=axis)
 
 
 def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
@@ -15,7 +15,7 @@ def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
     if not disjoint:
         # For each task take way classes
         sampled_classes = shuffle_along_axis(
-            rng_classes, jnp.arange(images.shape[0])[None, :].repeat(num_tasks, 0), 1
+            rng_classes, onp.arange(images.shape[0])[None, :].repeat(num_tasks, 0), 1
         )[:, :way]
         # Flatten everything for indexing
         sampled_classes = sampled_classes.reshape(num_tasks * way, 1)
@@ -25,7 +25,7 @@ def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
         # Sample from all the classes without repetition between tasks
         sampled_classes = random.choice(
             rng_classes,
-            jnp.arange(images.shape[0]),
+            onp.arange(images.shape[0]),
             (num_tasks * way, 1),
             replace=False,
         )
@@ -34,7 +34,7 @@ def sample_tasks(rng, images, labels, num_tasks, way, shot, disjoint=True):
 
     # For each task for each class sample shot indexes
     sampled_idxs = shuffle_along_axis(
-        rng_idxs, jnp.arange(images.shape[1])[None].repeat(num_tasks * way, 0), 1
+        rng_idxs, onp.arange(images.shape[1])[None].repeat(num_tasks * way, 0), 1
     )[:, :shot]
 
     sampled_images = images[sampled_classes, sampled_idxs]
@@ -69,7 +69,7 @@ def fsl_sample(
     )
     if shuffled_labels:
         labels = (
-            jnp.repeat(jnp.arange(way), spt_shot + qry_shot)
+            onp.repeat(onp.arange(way), spt_shot + qry_shot)
             .reshape(way, spt_shot + qry_shot)[None, :]
             .repeat(num_tasks, 0)
         )
@@ -82,10 +82,10 @@ def fsl_build(
     images, labels, batch_size, way, shot, qry_shot,
 ):
     image_shape = images.shape[-3:]
-    x_spt, x_qry = jnp.split(images, (shot,), 2)
+    x_spt, x_qry = onp.split(images, (shot,), 2)
     x_spt = x_spt.reshape(batch_size, way * shot, *image_shape)
     x_qry = x_qry.reshape(batch_size, way * qry_shot, *image_shape)
-    y_spt, y_qry = jnp.split(labels, (shot,), 2)
+    y_spt, y_qry = onp.split(labels, (shot,), 2)
     y_spt = y_spt.reshape(batch_size, way * shot)
     y_qry = y_qry.reshape(batch_size, way * qry_shot)
     return x_spt, y_spt, x_qry, y_qry
