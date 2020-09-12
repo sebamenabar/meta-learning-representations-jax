@@ -29,17 +29,17 @@ def normalize_fn(x, mean, std):
     return (x - mean) / std
 
 
-def prepare_data(dataset, data_fp, device):
+def prepare_data(dataset, data_fp, device=None):
     mean, std = statistics[dataset]
     if dataset == "miniimagenet":
         images, labels, _ = prepare_mi_data(data_fp, "train")
         # val_images, val_labels, _ = prepare_mi_data(data_dir, "val")
-        mean = jax.device_put(mean, device)
-        std = jax.device_put(std, device)
+        # mean = jax.device_put(mean, device)
+        # std = jax.device_put(std, device)
         _normalize_fn = partial(normalize_fn, mean=mean, std=std)
 
-    images = jnp.array(images)
-    labels = jnp.array(labels)
+    images = onp.array(images)
+    labels = onp.array(labels)
 
     return images, labels, _normalize_fn
 
