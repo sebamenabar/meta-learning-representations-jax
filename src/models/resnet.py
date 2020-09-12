@@ -105,7 +105,6 @@ class BasicBlock(hk.Module):
             out = self.se(out)
 
         if self.use_projection:
-            print("Downsampling residual")
             residual = self.downsample_conv(residual)
             residual = self.downsample_bn(residual, is_training, test_local_stats)
         out += residual
@@ -291,7 +290,7 @@ class ResNet(hk.Module):
         if is_feat:
             return [f0, f1, f2, f3], x
         else:
-            return x
+            return (x,)
 
 
 resnet12 = jax.partial(ResNet, BasicBlock, [1, 1, 1, 1])
