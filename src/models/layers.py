@@ -3,6 +3,8 @@ import jax
 import jax.numpy as jnp
 import haiku as hk
 
+from typing import Optional, Sequence
+
 
 def build_initializer(nonlinearity, name, truncated=False):
     if name == "glorot_uniform":
