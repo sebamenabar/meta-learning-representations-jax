@@ -28,7 +28,7 @@ from config import rsetattr
 from data.sampling import BatchSampler, fsl_sample_transfer_build
 from data import prepare_data
 from experiment import Experiment, Logger
-from models.maml_conv import make_params, prepare_model
+from models import make_params, prepare_model
 from lib import (
     setup_device,
     mean_xe_and_acc_dict,
@@ -37,7 +37,8 @@ from lib import (
 )
 from models.activations import activations
 from test_utils import SupervisedStandardTester, SupervisedCosineTester
-import utils.augmentations as augmentations
+from data import augment
+# import utils.augmentations as augmentations
 
 
 def step(rng, params, state, inputs, targets, opt_state, loss_fn, opt_update_fn):
@@ -78,6 +79,9 @@ def embeddings_fn(slow_params, slow_state, rng, inputs, is_training, slow_apply)
 def parse_args():
     parser = Experiment.add_args()
     # Network hyperparameters
+    parser.add_argument(
+        "--model.name", default="resnet12", choices=["convnet4", "resnet12"]
+    )
     parser.add_argument("--model.hidden_size", default=32, type=int)
     parser.add_argument("--model.no_track_bn_stats", default=False, action="store_true")
     parser.add_argument(
@@ -107,22 +111,22 @@ def parse_args():
     return args, cfg
 
 
-def augment(rng, imgs, color_jitter_prob=1.0):
-    rng_crop, rng_color, rng_flip = split(rng, 3)
-    imgs = augmentations.random_crop(imgs, rng_crop, 84, ((8, 8), (8, 8), (0, 0)))
-    imgs = augmentations.color_transform(
-        imgs,
-        rng_color,
-        brightness=0.4,
-        contrast=0.4,
-        saturation=0.4,
-        hue=0.0,
-        color_jitter_prob=color_jitter_prob,
-        to_grayscale_prob=0.0,
-    )
-    imgs = augmentations.random_flip(imgs, rng_flip)
-    # imgs = normalize_fn(imgs)
-    return imgs
+# def augment(rng, imgs, color_jitter_prob=1.0):
+#     rng_crop, rng_color, rng_flip = split(rng, 3)
+#     imgs = augmentations.random_crop(imgs, rng_crop, 84, ((8, 8), (8, 8), (0, 0)))
+#     imgs = augmentations.color_transform(
+#         imgs,
+#         rng_color,
+#         brightness=0.4,
+#         contrast=0.4,
+#         saturation=0.4,
+#         hue=0.0,
+#         color_jitter_prob=color_jitter_prob,
+#         to_grayscale_prob=0.0,
+#     )
+#     imgs = augmentations.random_flip(imgs, rng_flip)
+#     # imgs = normalize_fn(imgs)
+#     return imgs
 
 
 if __name__ == "__main__":
@@ -178,13 +182,13 @@ if __name__ == "__main__":
     # output_size = sup_train_images.shape[0]
     output_size = 64
     body, head = prepare_model(
+        cfg.model.model_name,
         cfg.dataset,
         output_size,
-        cfg.model.hidden_size,
-        cfg.model.activation,
-        track_stats=not cfg.model.no_track_bn_stats,
-        initializer="kaiming_normal",
         avg_pool=True,
+        initializer="kaiming_normal",
+        track_stats=not cfg.model.no_track_bn_stats,
+        head_bias=True,
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
@@ -343,7 +347,6 @@ if __name__ == "__main__":
                 )
 
             pbar.update()
-
 
     with open(osp.join(exp.exp_dir, "checkpoints/last.ckpt"), "wb") as f:
         dill.dump(
