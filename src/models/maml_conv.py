@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 from jax.random import split
 import haiku as hk
+
+from .layers import build_initializer
 from .activations import activations
 from typing import Optional, Sequence
 
@@ -212,16 +214,19 @@ class ConvBlock(hk.Module):
             self.conv_stride = self.stride[:2]
         # self.conv_stride = (1, 1)
         self.track_stats = track_stats
-        if initializer == "glorot_uniform":
-            self.initializer = hk.initializers.VarianceScaling(
-                1.0, "fan_avg", "uniform"
-            )
-        elif initializer == "kaiming_normal":
-            self.initializer = hk.initializers.VarianceScaling(
-                2.0, "fan_out", "truncated_normal"
-            )
-        else:
-            raise NameError(f"Unknown initializer {initializer}")
+        self.initializer = build_initializer(
+            activation, name=initializer, truncated=False
+        )
+        # if initializer == "glorot_uniform":
+        #     self.initializer = hk.initializers.VarianceScaling(
+        #         1.0, "fan_avg", "uniform"
+        #     )
+        # elif initializer == "kaiming_normal":
+        #     self.initializer = hk.initializers.VarianceScaling(
+        #         2.0, "fan_out", "truncated_normal"
+        #     )
+        # else:
+        #     raise NameError(f"Unknown initializer {initializer}")
 
     def __call__(self, x, is_training):
         x = hk.Conv2D(
@@ -241,11 +246,7 @@ class ConvBlock(hk.Module):
                 decay_rate=0.999
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
-            )(
-                x,
-                is_training=is_training,
-                test_local_stats=not self.track_stats,
-            )
+            )(x, is_training=is_training, test_local_stats=not self.track_stats,)
 
         elif self.normalize == "gn":
             x = hk.GroupNorm(groups=4)(x)
@@ -363,11 +364,7 @@ class MiniImagenetCNNBody(hk.Module):
                 decay_rate=0.999
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
-            )(
-                x,
-                is_training=is_training,
-                test_local_stats=not self.track_stats,
-            )
+            )(x, is_training=is_training, test_local_stats=not self.track_stats,)
         elif self.final_norm == "gn":
             x = hk.GroupNorm(4)(x)
         elif self.final_norm == "in":
@@ -441,8 +438,7 @@ def make_miniimagenet_cnn(
             normalize=normalize,
             avg_pool=avg_pool,
         )(
-            x,
-            is_training,
+            x, is_training,
         )
     )
     MiniImagenetCNNHead_t = hk.transform_with_state(
@@ -454,8 +450,7 @@ def make_miniimagenet_cnn(
             avg_pool=avg_pool,
             head_bias=head_bias,
         )(
-            x,
-            is_training,
+            x, is_training,
         )
     )
 
