@@ -69,7 +69,7 @@ class Experiment:
     def logfile_init(self, backends=None):
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
         self.logging = Logger(self.logfile, backends)
-        atexit.register(self.logfile.close)
+        # atexit.register(self.logfile.close)
         self.log(f"Experiment directory: {self.exp_dir}")
         self.log("\nCLI arguments")
         self.log(pp.pformat(vars(self.args)))
