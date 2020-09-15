@@ -726,7 +726,7 @@ if __name__ == "__main__":
             pbar.update()
             counter += 1
 
-        rng, rng_step, rng_sample, rng_augment = split(rng, 4)
+        rng, rng_step, rng_sample, rng_augment, rng_sample_cl = split(rng, 5)
         if cfg.train.prefetch > 0:
             x, y = next(train_input)
         else:
@@ -735,7 +735,7 @@ if __name__ == "__main__":
         # y = jax.device_put(y, device)
         x_spt, y_spt, x_qry, y_qry = fsl_build_ins(x, y)
         if cfg.train.method == "cl":
-            (rng_sample_cl,) = split(rng_sample, 1)
+            # (rng_sample_cl,) = split(rng_sample, 1)
             if cfg.train.prefetch > 0:
                 x_cl, y_cl = next(train_input_cl)
             else:
@@ -833,35 +833,35 @@ if __name__ == "__main__":
                 ),
             )
 
-            exp.log("Fitting Multinomial Regression")
-            fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
-                rng_test_lr_1,
-                partial(embeddings_fn, slow_params, slow_state),
-                test_sample_fn_5_w_1_s,
-                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                pool=cfg.pool_lr,
-                # n_jobs=cfg.n_jobs_lr,
-            )
-            fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
-                rng_test_lr_5,
-                partial(embeddings_fn, slow_params, slow_state),
-                test_sample_fn_5_w_5_s,
-                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-                pool=cfg.pool_lr,
-                # n_jobs=cfg.n_jobs_lr,
-            )
+            # exp.log("Fitting Multinomial Regression")
+            # fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
+            #     rng_test_lr_1,
+            #     partial(embeddings_fn, slow_params, slow_state),
+            #     test_sample_fn_5_w_1_s,
+            #     cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+            #     pool=cfg.pool_lr,
+            #     # n_jobs=cfg.n_jobs_lr,
+            # )
+            # fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
+            #     rng_test_lr_5,
+            #     partial(embeddings_fn, slow_params, slow_state),
+            #     test_sample_fn_5_w_5_s,
+            #     cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+            #     pool=cfg.pool_lr,
+            #     # n_jobs=cfg.n_jobs_lr,
+            # )
 
             fsl_maml_loss_1 = fsl_maml_1_res[0].mean()
             fsl_maml_acc_1 = fsl_maml_1_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
             fsl_maml_loss_5 = fsl_maml_5_res[0].mean()
             fsl_maml_acc_5 = fsl_maml_5_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
-            fsl_lr_1_acc = (fsl_lr_1_preds == fsl_lr_1_targets).astype(onp.float).mean()
-            fsl_lr_5_acc = (fsl_lr_5_preds == fsl_lr_5_targets).astype(onp.float).mean()
+            # fsl_lr_1_acc = (fsl_lr_1_preds == fsl_lr_1_targets).astype(onp.float).mean()
+            # fsl_lr_5_acc = (fsl_lr_5_preds == fsl_lr_5_targets).astype(onp.float).mean()
 
             exp.log(f"\nValidation step {counter} results:")
-            exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
-            exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
+            # exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
+            # exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
             exp.log(
                 f"{val_way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}"
             )
@@ -871,8 +871,8 @@ if __name__ == "__main__":
 
             exp.log_metrics(
                 {
-                    "5w5s-lr-acc": fsl_lr_5_acc,
-                    "5w1s-lr-acc": fsl_lr_1_acc,
+                    # "5w5s-lr-acc": fsl_lr_5_acc,
+                    # "5w1s-lr-acc": fsl_lr_1_acc,
                     "acc_5": fsl_maml_acc_5,
                     "acc_1": fsl_maml_acc_1,
                     "loss_5": fsl_maml_loss_5,
@@ -882,9 +882,11 @@ if __name__ == "__main__":
                 prefix="val",
             )
 
-            if fsl_lr_5_acc > best_val_acc:
-                best_val_acc = fsl_lr_5_acc
-                exp.log(f"\  New best 5-way-5-shot validation accuracy: {best_val_acc}")
+            # if fsl_lr_5_acc > best_val_acc:
+            if fsl_maml_acc_5 > best_val_acc:
+                # best_val_acc = fsl_lr_5_acc
+                best_val_acc = fsl_maml_acc_5
+                exp.log(f"\  New best {val_way}-way-5-shot validation accuracy: {best_val_acc}")
                 exp.log("Saving checkpoint\n")
                 with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
                     dill.dump(
@@ -893,8 +895,8 @@ if __name__ == "__main__":
                             "val_loss_1": fsl_maml_loss_1,
                             "val_acc_5": fsl_maml_acc_5,
                             "val_loss_5": fsl_maml_loss_5,
-                            "val_lr_5w5s_acc": fsl_lr_5_acc,
-                            "val_lr_5w1s_acc": fsl_lr_1_acc,
+                            # "val_lr_5w5s_acc": fsl_lr_5_acc,
+                            # "val_lr_5w1s_acc": fsl_lr_1_acc,
                             "optimizer_state": outer_opt_state,
                             "slow_params": slow_params,
                             "fast_params": fast_params,
@@ -933,7 +935,7 @@ if __name__ == "__main__":
                 foa=f"{train_final_outer_acc:.2f}",
                 va1=f"{fsl_maml_acc_1:.2f}",
                 va5=f"{fsl_maml_acc_5:.2f}",
-                vlr5=f"{fsl_lr_5_acc:.2f}",
-                vlr1=f"{fsl_lr_1_acc:.2f}",
+                # vlr5=f"{fsl_lr_5_acc:.2f}",
+                # vlr1=f"{fsl_lr_1_acc:.2f}",
                 refresh=False,
             )
