@@ -105,7 +105,11 @@ def apply_and_loss_fn(
     slow_rng, fast_rng = split(rng)
 
     slow_outputs, slow_state = slow_apply(
-        slow_params, slow_state, slow_rng, inputs, is_training,
+        slow_params,
+        slow_state,
+        slow_rng,
+        inputs,
+        is_training,
     )
     fast_outputs, fast_state = fast_apply(
         fast_params, fast_state, fast_rng, *slow_outputs, is_training
@@ -188,7 +192,9 @@ def outer_loop(
         rng, rng_reset = split(rng)
         tree_flat, tree_struct = jax.tree_flatten(fast_params)
         rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
-        fast_params = jax.tree_multimap(partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params)
+        fast_params = jax.tree_multimap(
+            partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params
+        )
 
     _fast_apply_and_loss_fn = partial(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
@@ -197,7 +203,11 @@ def outer_loop(
     # To have proper statitics on the first step we need to compute
     # them before the first inner loop
     slow_outputs, outer_slow_state = slow_apply(
-        slow_params, slow_state, rng_outer_slow, x_qry, is_training,
+        slow_params,
+        slow_state,
+        rng_outer_slow,
+        x_qry,
+        is_training,
     )
     if "outer" in track_slow_state:
         print("Using outer statistics")
@@ -223,10 +233,20 @@ def outer_loop(
         print("Using inner statistics")
         slow_state = inner_slow_state
     initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
+        fast_params,
+        fast_state,
+        rng_outer_fast,
+        slow_outputs,
+        is_training,
+        y_qry,
     )
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        inner_fast_params, fast_state, rng_outer_fast, slow_outputs, is_training, y_qry,
+        inner_fast_params,
+        fast_state,
+        rng_outer_fast,
+        slow_outputs,
+        is_training,
+        y_qry,
     )
     return (
         final_loss,
@@ -267,7 +287,11 @@ def fsl_inner_loop(
     )
     rng_slow, *rngs = split(rng, num_steps + 2)
     slow_outputs, slow_state = slow_apply(
-        slow_params, slow_state, rng_slow, inputs, is_training,
+        slow_params,
+        slow_state,
+        rng_slow,
+        inputs,
+        is_training,
     )
 
     losses = []
@@ -291,7 +315,12 @@ def fsl_inner_loop(
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rngs[i + 1], slow_outputs, is_training, targets,
+        fast_params,
+        fast_state,
+        rngs[i + 1],
+        slow_outputs,
+        is_training,
+        targets,
     )
     if return_history:
         losses.append(final_loss)
@@ -340,11 +369,20 @@ def cl_inner_loop(
     )
     rng_slow, rng_fast, *rngs = split(rng, inputs.shape[0] + 2)
     slow_outputs, slow_state = slow_apply(
-        slow_params, slow_state, rng_slow, inputs, is_training,
+        slow_params,
+        slow_state,
+        rng_slow,
+        inputs,
+        is_training,
     )
 
     initial_loss, (_, *initial_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_fast, slow_outputs, is_training, targets,
+        fast_params,
+        fast_state,
+        rng_fast,
+        slow_outputs,
+        is_training,
+        targets,
     )
 
     losses = []
@@ -371,7 +409,12 @@ def cl_inner_loop(
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
-        fast_params, fast_state, rng_fast, slow_outputs, is_training, targets,
+        fast_params,
+        fast_state,
+        rng_fast,
+        slow_outputs,
+        is_training,
+        targets,
     )
     if return_history:
         # losses.append(final_loss)
@@ -399,176 +442,106 @@ def cl_inner_loop(
     )
 
 
-def make_fsl_inner_loop(
-    slow_apply, fast_apply_and_loss_fn, opt_update_fn, num_steps, update_state=False
+def meta_step(
+    rng,
+    step_num,
+    outer_opt_state,
+    slow_params,
+    fast_params,
+    slow_state,
+    fast_state,
+    x_spt,
+    y_spt,
+    x_qry,
+    y_qry,
+    spt_classes,
+    inner_opt_init,
+    outer_opt_update,
+    batched_outer_loop_ins,
+    reset_fast_params_fn=None,
+    preprocess_images_fn=None,
 ):
-    def inner_loop(
-        rng,
+    rng, rng_preprocess = split(rng)
+    if preprocess_images_fn:
+        x_spt, x_qry = preprocess_images_fn(rng_preprocess, x_spt, x_qry)
+    if reset_fast_params_fn:
+        rng, rng_reset = split(rng)
+        tree_flat, tree_struct = jax.tree_flatten(fast_params)
+        rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+        fast_params = jax.tree_multimap(
+            partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params
+        )
+    inner_opt_state = inner_opt_init(fast_params)
+
+    (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
+        batched_outer_loop_ins, (0, 1), has_aux=True
+    )(
         slow_params,
         fast_params,
         slow_state,
         fast_state,
-        is_training,
-        opt_state,
-        x_spt,
-        y_spt,
-        num_steps=num_steps,
-        update_state=update_state,
-    ):
-        slow_outputs, slow_state = slow_apply(
-            rng, slow_params, slow_state, is_training, x_spt,
-        )
-        for i in range(num_steps):
-            (loss, (new_fast_state, *aux)), grads = value_and_grad(
-                fast_apply_and_loss_fn, 1, has_aux=True
-            )(rng, fast_params, fast_state, is_training, *slow_outputs, y_spt)
-            if update_state:
-                fast_state = new_fast_state
-            if i == 0:
-                initial_loss = loss
-                initial_aux = aux
-            updates, opt_state = opt_update_fn(grads, opt_state, fast_params)
-            fast_params = ox.apply_updates(fast_params, updates)
-
-        final_loss, (final_fast_state, *final_aux) = fast_apply_and_loss_fn(
-            rng, fast_params, fast_state, False, *slow_outputs, y_spt
-        )
-
-        return (
-            fast_params,
-            slow_state,
-            fast_state,
-            {
-                "initial_loss": initial_loss,
-                "final_loss": final_loss,
-                "initial_aux": initial_aux,
-                "final_aux": final_aux,
-            },
-        )
-
-    return inner_loop
-
-
-def make_outer_loop(
-    slow_apply, fast_apply_and_loss_fn, inner_loop, num_steps, update_state=False
-):
-    def outer_loop(
-        rng,
-        slow_params,
-        fast_params,
-        slow_state,
-        fast_state,
-        is_training,
         inner_opt_state,
+        split(rng, x_spt.shape[0]),
         x_spt,
         y_spt,
         x_qry,
         y_qry,
-        num_steps=num_steps,
-        update_state=update_state,
-    ):
-        slow_outputs, initial_slow_state = slow_apply(
-            rng, slow_params, slow_state, is_training, x_qry,
-        )
-        initial_loss, (initial_fast_state, *initial_aux) = fast_apply_and_loss_fn(
-            rng, fast_params, fast_state, is_training, *slow_outputs, y_qry,
-        )
-        fast_params, slow_state, fast_state, inner_info = inner_loop(
-            rng,
-            slow_params,
-            fast_params,
-            slow_state,
-            fast_state,
-            is_training,
-            inner_opt_state,
-            x_spt,
-            y_spt,
-            num_steps,
-            update_state,
-        )
-        final_loss, (final_fast_state, *final_aux) = fast_apply_and_loss_fn(
-            rng, fast_params, fast_state, is_training, *slow_outputs, y_qry,
-        )
+        spt_classes,
+    )
+    grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
+    updates, outer_opt_state = outer_opt_update(
+        grads, outer_opt_state, (slow_params, fast_params)
+    )
+    slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
 
-        return (
-            final_loss,
-            (
-                slow_state,
-                fast_state,
-                {
-                    "inner": inner_info,
-                    "outer": {
-                        "initial_loss": initial_loss,
-                        "final_loss": final_loss,
-                        "initial_aux": initial_aux,
-                        "final_aux": final_aux,
-                    },
-                },
-            ),
-        )
-
-    return outer_loop
+    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
 
-def make_batched_outer_loop(outer_loop):
-    def helper_fn(rng, x_spt, y_spt, x_qry, y_qry, **kwargs):
-        return outer_loop(
-            rng=rng, x_spt=x_spt, y_spt=y_spt, x_qry=x_qry, y_qry=y_qry, **kwargs
-        )
-
-    def batched_outer_loop(
-        rng,  # Assume rng is already split
-        slow_params,
-        fast_params,
-        slow_state,
-        fast_state,
-        is_training,
-        inner_opt_state,
-        bx_spt,
-        by_spt,
-        bx_qry,
-        by_qry,
-        num_steps,
-    ):
-
-        losses, (slow_states, fast_states, infos) = vmap(
-            partial(
-                helper_fn,
-                slow_params=slow_params,
-                fast_params=fast_params,
-                slow_state=slow_state,
-                fast_state=fast_state,
-                is_training=is_training,
-                inner_opt_state=inner_opt_state,
-                num_steps=num_steps,
-            )
-        )(rng, bx_spt, by_spt, bx_qry, by_qry)
-
-        return losses.mean(), (slow_states, fast_states, infos)
-
-    return batched_outer_loop
+def reset_by_idxs(w_make_fn, idxs, rng, array):
+    print("Resetting head by indexes")
+    return jax.ops.index_update(
+        array,
+        jax.ops.index[:, idxs],
+        w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
+    )
 
 
-def make_fsl_inner_outer_loop(
-    slow_apply,
-    fast_apply_and_loss_fn,
-    inner_opt_update_fn,
-    num_steps,
-    update_state=False,
+def reset_all(w_make_fn, idxs, rng, array):
+    print("Resetting all head")
+    return w_make_fn(dtype=array.dtype)(rng, array.shape)
+
+
+def delayed_cosine_decay_schedule(
+    init_value: float,
+    transition_begin: int,
+    decay_steps: int,
+    alpha: float = 0.0,
 ):
-    inner_loop = make_fsl_inner_loop(
-        slow_apply,
-        fast_apply_and_loss_fn,
-        inner_opt_update_fn,
-        num_steps=num_steps,
-        update_state=False,
-    )
-    outer_loop = make_outer_loop(
-        slow_apply,
-        fast_apply_and_loss_fn,
-        inner_loop,
-        num_steps=num_steps,
-        update_state=update_state,
-    )
-    return inner_loop, outer_loop
+    """Returns a function which implements cosine learning rate decay.
 
+    For more details see:
+      https://openreview.net/forum?id=Skq89Scxx&noteId=Skq89Scxx
+
+    Args:
+      init_value: An initial value `init_v`.
+      decay_steps: Positive integer - the number of steps for which to apply
+        the decay for.
+      alpha: Float. The minimum value of the multiplier used to adjust the
+        learning rate.
+
+    Returns:
+      schedule: A function that maps step counts to values.
+    """
+    if not decay_steps > 0:
+        raise ValueError("The cosine_decay_schedule requires positive decay_steps!")
+
+    def schedule(count):
+        count = jnp.minimum(count - transition_begin, decay_steps)
+        cosine_decay = 0.5 * (1 + jnp.cos(jnp.pi * count / decay_steps))
+        decayed = (1 - alpha) * cosine_decay + alpha
+        return jnp.where(count <= 0, init_value, init_value * decayed)
+
+    return schedule
+
+
+# return jnp.where(count <= 0, init_value, init_value * jnp.power(decay_rate, p))

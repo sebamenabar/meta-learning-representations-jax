@@ -62,41 +62,26 @@ def augment(rng, imgs, color_jitter_prob=1.0):
     return imgs
 
 
-# def prepare_data(dataset, data_dir, device, prefetch_data_gpu=False, normalized=False):
-#     mean, std = statistics[dataset]
-#     if dataset == "miniimagenet":
-#         if data_dir is None:
-#             # TEMP
-#             data_dir = "/mnt/ialabnas/homes/samenabar/data/FSL/mini-imagenet"
-#         train_images, train_labels, _ = prepare_mi_data(data_dir, "train")
-#         val_images, val_labels, _ = prepare_mi_data(data_dir, "val")
-#         mean = jax.device_put(mean, device)
-#         std = jax.device_put(std, device)
-#         preprocess_fn = partial(preprocess_data, mean=mean, std=std)
-#     if dataset == "cifar100":
-#         train_images, train_labels = prepare_cifar100_data(data_dir, "train", normalized)
-#         val_images, val_labels = prepare_cifar100_data(data_dir, "val", normalized)
-#         mean = jax.device_put(mean, device)
-#         std = jax.device_put(std, device)
-#         if normalized:
-#             preprocess_fn = lambda x: x
-#         else:
-#             preprocess_fn = partial(preprocess_data, mean=mean, std=std)
-#     elif dataset == "omniglot":
-#         train_images, train_labels = prepare_omn_data(data_dir, "train")
-#         val_images, val_labels = prepare_omn_data(data_dir, "val")
-#         preprocess_fn = lambda x: x
+def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
+    x_spt = x_spt / 255
+    x_qry = x_qry / 255
+    if augment == "all":
+        print("\nAugmenting support and query")
+        rng_spt, rng_qry = split(rng)
+        x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+        x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+    elif augment == "spt":
+        print("\nAugmenting support only")
+        x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+    elif augment == "qry":
+        print("\nAugmenting query only")
+        x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+    elif augment == "none":
+        print("\nNo augmentation")
+    else:
+        raise NameError(f"Unkwown augmentation {augment}")
 
-#     val_images = jnp.array(val_images)
-#     val_labels = jnp.array(val_labels)
-#     if prefetch_data_gpu:
-#         train_images = jax.device_put(train_images, device)
-#         train_labels = jax.device_put(train_labels, device)
-#         if dataset == "omniglot":
-#             val_images = jax.device_put(val_images, device)
-#             val_labels = jax.device_put(val_labels, device)
-#     else:
-#         train_images = jnp.array(train_images)
-#         train_labels = jnp.array(train_labels)
+    x_spt = normalize_fn(x_spt)
+    x_qry = normalize_fn(x_qry)
 
-#     return train_images, train_labels, val_images, val_labels, preprocess_fn
+    return x_spt, x_qry
