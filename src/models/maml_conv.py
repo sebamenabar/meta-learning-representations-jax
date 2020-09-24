@@ -248,7 +248,11 @@ class ConvBlock(hk.Module):
                 decay_rate=0.9
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
-            )(x, is_training=is_training, test_local_stats=not self.track_stats,)
+            )(
+                x,
+                is_training=is_training,
+                test_local_stats=not self.track_stats,
+            )
 
         elif self.normalize == "gn":
             print("group norm")
@@ -366,7 +370,13 @@ class MiniImagenetCNNBody(hk.Module):
             normalize=self.normalize,
         )(x, is_training)
         if self.avg_pool:
-            x = hk.avg_pool(x, (1, 5, 5, 1), 1, padding="VALID", channel_axis=3)
+            x = hk.avg_pool(
+                x,
+                jnp.array([1, 5, 5, 1]),
+                jnp.ones(1, dtype=jnp.int8),
+                padding="VALID",
+                channel_axis=3,
+            )
             x = hk.Reshape((self.hidden_size,))(x)
         if self.final_norm == "bn":
             x = hk.BatchNorm(
@@ -375,7 +385,11 @@ class MiniImagenetCNNBody(hk.Module):
                 decay_rate=0.9
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
-            )(x, is_training=is_training, test_local_stats=not self.track_stats,)
+            )(
+                x,
+                is_training=is_training,
+                test_local_stats=not self.track_stats,
+            )
         elif self.final_norm == "gn":
             x = hk.GroupNorm(4)(x)
         elif self.final_norm == "in":
@@ -449,7 +463,8 @@ def make_miniimagenet_cnn(
             normalize=normalize,
             avg_pool=avg_pool,
         )(
-            x, is_training,
+            x,
+            is_training,
         )
     )
     MiniImagenetCNNHead_t = hk.transform_with_state(
@@ -461,7 +476,8 @@ def make_miniimagenet_cnn(
             avg_pool=avg_pool,
             head_bias=head_bias,
         )(
-            x, is_training,
+            x,
+            is_training,
         )
     )
 

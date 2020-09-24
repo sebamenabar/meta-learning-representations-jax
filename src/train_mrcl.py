@@ -75,8 +75,8 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=10,
     )
-    parser.add_argument("--train.cl.qry_way", default=64, type=int)
-    parser.add_argument("--train.cl.qry_shot", default=1, type=int)
+    parser.add_argument("--train.cl_qry_way", default=64, type=int)
+    parser.add_argument("--train.cl_qry_shot", default=1, type=int)
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
@@ -175,11 +175,12 @@ def main(args, cfg):
     # It also creates a logfile.log which can be written to with exp.log
     # that is a wrapper of the print method
     exp = Experiment(cfg, args)
-    exp.logfile_init(
-        [sys.stdout]
-    )  # Send logged stuff also to stdout (but not all stdout to log)
-    exp.loggers_init()
-    sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
+    if not cfg.no_log:
+        exp.logfile_init(
+            [sys.stdout]
+        )  # Send logged stuff also to stdout (but not all stdout to log)
+        exp.loggers_init()
+        sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
 
     if cfg.debug:  # Debugging creates experiments folders in experiments/debug dir
         exp.log("Debugging ...")
@@ -271,7 +272,8 @@ def main(args, cfg):
             decay_steps=cfg.train.cosine_decay_steps,
             alpha=cfg.train.cosine_alpha,
         )
-        opt_transforms.append(schedule)
+        opt_transforms.append(ox.scale_by_schedule(schedule))
+        opt_transforms.append(ox.scale_by_schedule(schedule))
     elif cfg.train.scheduler == "step":
         schedule = ox.piecewise_constant_schedule(
             -cfg.train.outer_lr,
@@ -280,7 +282,7 @@ def main(args, cfg):
                 for e in cfg.train.piecewise_constant_schedule
             },
         )
-        opt_transforms.append(schedule)
+        opt_transforms.append(ox.scale_by_schedule(schedule))
     else:
         schedule = None
 
@@ -293,7 +295,7 @@ def main(args, cfg):
         "way": cfg.train.way,
         "spt_shot": cfg.train.shot,
         "qry_shot": cfg.train.qry_shot,
-        "shuffled_labels": cfg.train.method == "fsl",
+        "shuffled_labels": False,
         "disjoint": False,  # tasks can share classes
     }
     train_sample_fn = partial(
@@ -310,14 +312,14 @@ def main(args, cfg):
         )
     )
 
-    if cfg.train.cl.qry_way > 0:
+    if cfg.train.cl_qry_way > 0:
         train_cl_sample_fn_kwargs = {
             "images": train_images,
             "labels": train_labels,
             "num_tasks": effective_batch_size,
-            "way": cfg.train.cl.qry_way,
+            "way": cfg.train.cl_qry_way,
             "spt_shot": 0,
-            "qry_shot": cfg.train.cl.qry_shot,
+            "qry_shot": cfg.train.cl_qry_shot,
             "shuffled_labels": False,
             "disjoint": False,  # tasks can share classes
         }
@@ -329,9 +331,9 @@ def main(args, cfg):
             partial(
                 fsl_build,
                 batch_size=effective_batch_size,
-                way=cfg.train.cl.qry_way,
+                way=cfg.train.cl_qry_way,
                 shot=0,
-                qry_shot=cfg.train.cl.qry_shot,
+                qry_shot=cfg.train.cl_qry_shot,
             )
         )
 

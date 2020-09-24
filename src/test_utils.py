@@ -17,6 +17,7 @@ def test_fsl_maml(
     rng,
     slow_params,
     fast_params,
+    inner_lr,
     slow_state,
     fast_state,
     num_batches,
@@ -46,6 +47,7 @@ def test_fsl_maml(
         loss, (_, _, info) = batched_outer_loop(
             slow_params,
             fast_params,
+            inner_lr,
             slow_state,
             fast_state,
             inner_opt_init(fast_params),

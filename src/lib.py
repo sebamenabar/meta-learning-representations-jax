@@ -139,6 +139,7 @@ def fast_apply_and_loss_fn(
 def batched_outer_loop(
     slow_params,
     fast_params,
+    inner_lr,
     replicated_slow_state,
     replicated_fast_state,
     inner_opt_state,
@@ -152,7 +153,7 @@ def batched_outer_loop(
 ):
     def helper(slow_state, fast_state, *args):
         return outer_loop(
-            slow_params, fast_params, slow_state, fast_state, inner_opt_state, *args
+            slow_params, fast_params, inner_lr, slow_state, fast_state, inner_opt_state, *args
         )
 
     losses, aux = vmap(helper)(
@@ -171,6 +172,7 @@ def batched_outer_loop(
 def outer_loop(
     slow_params,
     fast_params,
+    inner_lr,
     slow_state,
     fast_state,
     inner_opt_state,
@@ -222,6 +224,7 @@ def outer_loop(
     ) = inner_loop(
         slow_params,
         fast_params,
+        inner_lr,
         slow_state,
         fast_state,
         inner_opt_state,
@@ -267,6 +270,7 @@ def outer_loop(
 def fsl_inner_loop(
     slow_params,
     fast_params,
+    inner_lr,
     slow_state,
     fast_state,
     opt_state,
@@ -311,7 +315,7 @@ def fsl_inner_loop(
             losses.append(loss)
             auxs.append(aux)
 
-        updates, opt_state = opt_update_fn(grads, opt_state, fast_params)
+        updates, opt_state = opt_update_fn(inner_lr, grads, opt_state, fast_params)
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
@@ -349,6 +353,7 @@ def fsl_inner_loop(
 def cl_inner_loop(
     slow_params,
     fast_params,
+    inner_lr,
     slow_state,
     fast_state,
     opt_state,
@@ -405,7 +410,7 @@ def cl_inner_loop(
             losses.append(loss)
             auxs.append(aux)
 
-        updates, opt_state = opt_update_fn(grads, opt_state, fast_params)
+        updates, opt_state = opt_update_fn(inner_lr, grads, opt_state, fast_params)
         fast_params = ox.apply_updates(fast_params, updates)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
@@ -448,6 +453,7 @@ def meta_step(
     outer_opt_state,
     slow_params,
     fast_params,
+    inner_lr,
     slow_state,
     fast_state,
     x_spt,
@@ -460,6 +466,7 @@ def meta_step(
     batched_outer_loop_ins,
     reset_fast_params_fn=None,
     preprocess_images_fn=None,
+    train_inner_lr=False,
 ):
     rng, rng_preprocess = split(rng)
     if preprocess_images_fn:
@@ -473,11 +480,16 @@ def meta_step(
         )
     inner_opt_state = inner_opt_init(fast_params)
 
+    if train_inner_lr:
+        positions = (0, 1, 2)
+    else:
+        positions = (0, 1)
     (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
-        batched_outer_loop_ins, (0, 1), has_aux=True
+        batched_outer_loop_ins, positions, has_aux=True
     )(
         slow_params,
         fast_params,
+        inner_lr,
         slow_state,
         fast_state,
         inner_opt_state,
@@ -489,12 +501,18 @@ def meta_step(
         spt_classes,
     )
     grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
-    updates, outer_opt_state = outer_opt_update(
-        grads, outer_opt_state, (slow_params, fast_params)
-    )
-    slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
+    if train_inner_lr:
+        updates, outer_opt_state = outer_opt_update(
+            grads, outer_opt_state, (slow_params, fast_params, inner_lr)
+        )
+        slow_params, fast_params, inner_lr = ox.apply_updates((slow_params, fast_params, inner_lr), updates)
+    else:
+        updates, outer_opt_state = outer_opt_update(
+            grads, outer_opt_state, (slow_params, fast_params)
+        )
+        slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
 
-    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
+    return outer_opt_state, slow_params, fast_params, inner_lr, slow_state, fast_state, info
 
 
 def reset_by_idxs(w_make_fn, idxs, rng, array):

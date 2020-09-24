@@ -35,11 +35,15 @@ from lib import (
     batched_outer_loop,
     parse_and_build_cfg,
     mean_xe_and_acc_dict,
+    meta_step,
+    reset_by_idxs,
+    reset_all,
     # outer_loop_reset_per_task,
 )
-from data import prepare_data, augment as augment_fn
+from data import prepare_data, augment as augment_fn, preprocess_images
 from experiment import Experiment, Logger
 from data.sampling import fsl_sample, fsl_build, BatchSampler
+
 # from models.maml_conv import miniimagenet_cnn_argparse, prepare_model, make_params
 from models import make_params, prepare_model
 from test_utils import test_fsl_maml, test_fsl_embeddings
@@ -69,23 +73,33 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=10,
     )
-    parser.add_argument("--train.cl.qry_way", default=64, type=int)
-    parser.add_argument("--train.cl.qry_shot", default=1, type=int)
+    parser.add_argument("--train.cl_qry_way", default=64, type=int)
+    parser.add_argument("--train.cl_qry_shot", default=1, type=int)
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
     parser.add_argument("--train.outer_lr", type=float, default=1e-3)
     parser.add_argument("--train.num_inner_steps", type=int, default=5)
+    parser.add_argument("--train.train_inner_lr", default=False, action="store_true")
 
     parser.add_argument("--train.prefetch", default=0, type=int)
     parser.add_argument("--train.weight_decay", default=0.0, type=float)
     parser.add_argument("--train.apply_every", default=1, type=int)
-    parser.add_argument("--train.cosine_schedule", action="store_true", default=False)
-    parser.add_argument("--train.cosine_alpha", type=float, default=0.01)
+    parser.add_argument("--train.scheduler", choices=["none", "step", "cosine"])
+
     parser.add_argument(
         "--train.piecewise_constant_schedule",
         nargs="*",
         type=int,
         default=[10000, 25000],
     )
+    parser.add_argument(
+        "--train.piecewise_constant_alpha",
+        default=0.1,
+        type=float,
+    )
+
+    parser.add_argument("--train.cosine_alpha", type=float, default=0.01)
+    parser.add_argument("--train.cosine_decay_steps", type=float, default=10000)
+    parser.add_argument("--train.cosine_transition_begin", type=float, default=5000)
 
     parser.add_argument(
         "--train.augment", default="none", choices=["none", "all", "spt", "qry"]
@@ -98,7 +112,15 @@ def parse_args(parser=None):
         "--train.reset_head",
         type=str,
         default="none",
-        choices=["none", "all-zero", "all-random", "cls-zero", "cls-random"],
+        choices=[
+            "none",
+            "all-zero",
+            "all-glorot",
+            "all-kaiming",
+            "cls-zero",
+            "cls-glorot",
+            "cls-kaiming",
+        ],
     )
 
     # parser.add_argument("--val.pool", type=int, default=4)
@@ -134,7 +156,7 @@ def parse_args(parser=None):
         "--model.normalize",
         default="bn",
         type=str,
-        choices=["bn", "gn", "in", "ln", "custom", "none"],
+        choices=["bn", "affine", "gn", "in", "ln", "custom", "none"],
     )
     parser.add_argument(
         "--model.track_stats",
@@ -151,173 +173,175 @@ def parse_args(parser=None):
     return args, cfg
 
 
-def step(
-    rng,
-    step_num,
-    outer_opt_state,
-    slow_params,
-    fast_params,
-    slow_state,
-    fast_state,
-    x_spt,
-    y_spt,
-    x_qry,
-    y_qry,
-    spt_classes,
-    inner_opt_init,
-    outer_opt_update,
-    batched_outer_loop_ins,
-    reset_fast_params_fn=None,
-    preprocess_images_fn=None,
-):
-    rng, rng_preprocess = split(rng)
-    if preprocess_images_fn:
-        x_spt, x_qry = preprocess_images_fn(rng_preprocess, x_spt, x_qry)
-    if reset_fast_params_fn:
-        rng, rng_reset = split(rng)
-        tree_flat, tree_struct = jax.tree_flatten(fast_params)
-        rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
-        fast_params = jax.tree_multimap(
-            partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params
-        )
-    inner_opt_state = inner_opt_init(fast_params)
+# def step(
+#     rng,
+#     step_num,
+#     outer_opt_state,
+#     slow_params,
+#     fast_params,
+#     slow_state,
+#     fast_state,
+#     inner_lr,
+#     x_spt,
+#     y_spt,
+#     x_qry,
+#     y_qry,
+#     spt_classes,
+#     # inner_opt_init,
+#     inner_opt,
+#     outer_opt_update,
+#     batched_outer_loop_ins,
+#     reset_fast_params_fn=None,
+#     preprocess_images_fn=None,
+#     learn_lr=False,
+# ):
+#     rng, rng_preprocess = split(rng)
+#     if preprocess_images_fn:
+#         x_spt, x_qry = preprocess_images_fn(rng_preprocess, x_spt, x_qry)
+#     if reset_fast_params_fn:
+#         rng, rng_reset = split(rng)
+#         tree_flat, tree_struct = jax.tree_flatten(fast_params)
+#         rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
+#         fast_params = jax.tree_multimap(
+#             partial(reset_fast_params_fn, spt_classes), rng_tree, fast_params
+#         )
+#     # inner_opt_state = inner_opt_init(fast_params)
 
-    (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
-        batched_outer_loop_ins, (0, 1), has_aux=True
-    )(
-        slow_params,
-        fast_params,
-        slow_state,
-        fast_state,
-        inner_opt_state,
-        split(rng, x_spt.shape[0]),
-        x_spt,
-        y_spt,
-        x_qry,
-        y_qry,
-        spt_classes,
-    )
-    grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
-    updates, outer_opt_state = outer_opt_update(
-        grads, outer_opt_state, (slow_params, fast_params)
-    )
-    slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
+#     (outer_loss, (slow_state, fast_state, info)), grads = value_and_grad(
+#         batched_outer_loop_ins, (0, 1), has_aux=True
+#     )(
+#         slow_params,
+#         fast_params,
+#         slow_state,
+#         fast_state,
+#         inner_opt_state,
+#         split(rng, x_spt.shape[0]),
+#         x_spt,
+#         y_spt,
+#         x_qry,
+#         y_qry,
+#         spt_classes,
+#     )
+#     grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
+#     updates, outer_opt_state = outer_opt_update(
+#         grads, outer_opt_state, (slow_params, fast_params)
+#     )
+#     slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
 
-    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
-
-
-def step_reset(
-    rng,
-    step_num,
-    outer_opt_state,
-    slow_params,
-    fast_params,
-    slow_state,
-    fast_state,
-    x_spt,
-    y_spt,
-    x_qry,
-    y_qry,
-    spt_classes,
-    inner_opt_init,
-    outer_opt_update,
-    batched_outer_loop_ins,
-    train_method,
-):
-    if train_method == "fsl-reset-zero":
-        print("\nReseting head params to zero")
-        fast_params = hk.data_structures.merge(
-            {
-                "mini_imagenet_cnn_head/linear": {
-                    "w": jnp.zeros(
-                        fast_params["mini_imagenet_cnn_head/linear"]["w"].shape
-                    ),
-                }
-            }
-        )
-    else:
-        raise NameError(f"Unkwown train method `{train_method}`")
-
-    inner_opt_state = inner_opt_init(fast_params)
-
-    (outer_loss, (slow_state, _, info)), grads = value_and_grad(
-        batched_outer_loop_ins, 0, has_aux=True
-    )(
-        slow_params,
-        fast_params,
-        slow_state,
-        fast_state,
-        inner_opt_state,
-        split(rng, x_spt.shape[0]),
-        x_spt,
-        y_spt,
-        x_qry,
-        y_qry,
-        spt_classes,
-    )
-    updates, outer_opt_state = outer_opt_update(
-        grads,
-        outer_opt_state,
-        slow_params,
-    )
-    slow_params = ox.apply_updates(slow_params, updates)
-
-    return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
+#     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
 
-def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
-    x_spt = x_spt / 255
-    x_qry = x_qry / 255
-    if augment == "all":
-        print("\nAugmenting support and query")
-        rng_spt, rng_qry = split(rng)
-        x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
-        x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
-    elif augment == "spt":
-        print("\nAugmenting support only")
-        x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
-    elif augment == "qry":
-        print("\nAugmenting query only")
-        x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
-    elif augment == "none":
-        print("\nNo augmentation")
-    else:
-        raise NameError(f"Unkwown augmentation {augment}")
+# def step_reset(
+#     rng,
+#     step_num,
+#     outer_opt_state,
+#     slow_params,
+#     fast_params,
+#     slow_state,
+#     fast_state,
+#     x_spt,
+#     y_spt,
+#     x_qry,
+#     y_qry,
+#     spt_classes,
+#     inner_opt_init,
+#     outer_opt_update,
+#     batched_outer_loop_ins,
+#     train_method,
+# ):
+#     if train_method == "fsl-reset-zero":
+#         print("\nReseting head params to zero")
+#         fast_params = hk.data_structures.merge(
+#             {
+#                 "mini_imagenet_cnn_head/linear": {
+#                     "w": jnp.zeros(
+#                         fast_params["mini_imagenet_cnn_head/linear"]["w"].shape
+#                     ),
+#                 }
+#             }
+#         )
+#     else:
+#         raise NameError(f"Unkwown train method `{train_method}`")
 
-    x_spt = normalize_fn(x_spt)
-    x_qry = normalize_fn(x_qry)
+#     inner_opt_state = inner_opt_init(fast_params)
 
-    return x_spt, x_qry
+#     (outer_loss, (slow_state, _, info)), grads = value_and_grad(
+#         batched_outer_loop_ins, 0, has_aux=True
+#     )(
+#         slow_params,
+#         fast_params,
+#         slow_state,
+#         fast_state,
+#         inner_opt_state,
+#         split(rng, x_spt.shape[0]),
+#         x_spt,
+#         y_spt,
+#         x_qry,
+#         y_qry,
+#         spt_classes,
+#     )
+#     updates, outer_opt_state = outer_opt_update(
+#         grads,
+#         outer_opt_state,
+#         slow_params,
+#     )
+#     slow_params = ox.apply_updates(slow_params, updates)
+
+#     return outer_opt_state, slow_params, fast_params, slow_state, fast_state, info
 
 
-def reset_by_idxs(w_make_fn, idxs, rng, array):
-    print("Resetting head by indexes")
-    return jax.ops.index_update(
-        array,
-        jax.ops.index[:, idxs],
-        w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
-    )
+# def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
+#     x_spt = x_spt / 255
+#     x_qry = x_qry / 255
+#     if augment == "all":
+#         print("\nAugmenting support and query")
+#         rng_spt, rng_qry = split(rng)
+#         x_spt = augment_fn(rng_spt, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+#         x_qry = augment_fn(rng_qry, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+#     elif augment == "spt":
+#         print("\nAugmenting support only")
+#         x_spt = augment_fn(rng, flatten(x_spt, (0, 1))).reshape(*x_spt.shape)
+#     elif augment == "qry":
+#         print("\nAugmenting query only")
+#         x_qry = augment_fn(rng, flatten(x_qry, (0, 1))).reshape(*x_qry.shape)
+#     elif augment == "none":
+#         print("\nNo augmentation")
+#     else:
+#         raise NameError(f"Unkwown augmentation {augment}")
+
+#     x_spt = normalize_fn(x_spt)
+#     x_qry = normalize_fn(x_qry)
+
+#     return x_spt, x_qry
 
 
-def reset_all(w_make_fn, idxs, rng, array):
-    print("Resetting all head")
-    return w_make_fn(dtype=array.dtype)(rng, array.shape)
+# def reset_by_idxs(w_make_fn, idxs, rng, array):
+#     print("Resetting head by indexes")
+#     return jax.ops.index_update(
+#         array,
+#         jax.ops.index[:, idxs],
+#         w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
+#     )
 
 
-if __name__ == "__main__":
-    # parser = parse_args()
-    args, cfg = parse_args()
+# def reset_all(w_make_fn, idxs, rng, array):
+#     print("Resetting all head")
+#     return w_make_fn(dtype=array.dtype)(rng, array.shape)
+
+
+def main(args, cfg):
     # cfg = parse_and_build_cfg(args)
     # The Experiment class creates a directory for the experiment,
     # copies source files and creates configurations files
     # It also creates a logfile.log which can be written to with exp.log
     # that is a wrapper of the print method
     exp = Experiment(cfg, args)
-    exp.logfile_init(
-        [sys.stdout]
-    )  # Send logged stuff also to stdout (but not all stdout to log)
-    exp.loggers_init()
-    sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
+    if not cfg.no_log:
+        exp.logfile_init(
+            [sys.stdout]
+        )  # Send logged stuff also to stdout (but not all stdout to log)
+        exp.loggers_init()
+        sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
 
     if cfg.debug:  # Debugging creates experiments folders in experiments/debug dir
         exp.log("Debugging ...")
@@ -402,14 +426,13 @@ if __name__ == "__main__":
     exp.log(f"Per device batch size: {per_device_batch_size}")
 
     # Optimizers
-    inner_opt = ox.sgd(cfg.train.inner_lr)
-    if cfg.train.cosine_schedule:
+    if cfg.train.scheduler == "cosine":
         schedule = ox.cosine_decay_schedule(
             -cfg.train.outer_lr,
             cfg.train.num_outer_steps * cfg.train.apply_every,
             cfg.train.cosine_alpha,
         )
-    else:
+    elif cfg.train.scheduler == "step":
         schedule = ox.piecewise_constant_schedule(
             -cfg.train.outer_lr, {e: 0.1 for e in cfg.train.piecewise_constant_schedule}
         )
@@ -451,9 +474,9 @@ if __name__ == "__main__":
             "images": train_images,
             "labels": train_labels,
             "num_tasks": effective_batch_size,
-            "way": cfg.train.cl.qry_way,
+            "way": cfg.train.cl_qry_way,
             "spt_shot": 0,
-            "qry_shot": cfg.train.cl.qry_shot,
+            "qry_shot": cfg.train.cl_qry_shot,
             "shuffled_labels": False,
             "disjoint": False,  # tasks can share classes
         }
@@ -465,9 +488,9 @@ if __name__ == "__main__":
             partial(
                 fsl_build,
                 batch_size=effective_batch_size,
-                way=cfg.train.cl.qry_way,
+                way=cfg.train.cl_qry_way,
                 shot=0,
-                qry_shot=cfg.train.cl.qry_shot,
+                qry_shot=cfg.train.cl_qry_shot,
             )
         )
 
@@ -500,15 +523,22 @@ if __name__ == "__main__":
             shape,
             dtype=dtype,
         )
-    elif "random" in cfg.train.reset_head:
-        if cfg.model.initializer == "glorot_uniform":
-            exp.log("Using Glorot Uniform to reset head")
-            head_initializer = jax.nn.initializers.glorot_uniform
-        elif cfg.model.initializer == "kaiming_normal":
-            exp.log("Using Kaiming Normal to reset head")
-            head_initializer = jax.nn.initializers.he_normal
+    elif "glorot" in cfg.train.reset_head:
+        exp.log("Using Glorot Uniform to reset head")
+        head_initializer = jax.nn.initializers.glorot_uniform
+    elif "kaiming" in cfg.train.reset_head:
+        exp.log("Using Kaiming Normal to reset head")
+        head_initializer = jax.nn.initializers.he_normal
     else:
         head_initializer = None
+
+    # For ILR optimization
+    inner_lr = jnp.ones([]) * cfg.train.inner_lr
+    inner_opt = ox.sgd(inner_lr)
+
+    def inner_opt_update_fn(lr, updates, state, params):
+        inner_opt = ox.sgd(lr)
+        return inner_opt.update(updates, state, params)
 
     train_inner_loop_ins = partial(
         fsl_inner_loop,
@@ -517,7 +547,7 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
-        opt_update_fn=inner_opt.update,
+        opt_update_fn=inner_opt_update_fn,
     )
     if "cls" in cfg.train.reset_head:
         reset_fast_params_fn_outer = partial(reset_by_idxs, head_initializer)
@@ -543,7 +573,7 @@ if __name__ == "__main__":
     #     step_ins = step
     # elif cfg.train.reset_head == "fsl-reset-zero":
     #     step_ins = step_reset
-    step_fn = step
+    step_fn = meta_step
     if "all" in cfg.train.reset_head:
         reset_fast_params_fn_step = partial(reset_all, head_initializer)
     else:
@@ -562,6 +592,7 @@ if __name__ == "__main__":
                 augment=cfg.train.augment,
                 augment_fn=augment_fn,
             ),
+            train_inner_lr=cfg.train.train_inner_lr,
         ),
         axis_name="i",
     )
@@ -624,7 +655,7 @@ if __name__ == "__main__":
         slow_apply=body.apply,
         fast_apply=head.apply,
         loss_fn=mean_xe_and_acc_dict,
-        opt_update_fn=inner_opt.update,
+        opt_update_fn=inner_opt_update_fn,
     )
     test_outer_loop_ins = partial(
         outer_loop,
@@ -675,7 +706,10 @@ if __name__ == "__main__":
     #     outer_opt_state = outer_opt.init((slow_params, fast_params))
     # elif cfg.train.reset_head == "fsl-reset-zero":
     #     outer_opt_state = outer_opt.init(slow_params)
-    outer_opt_state = outer_opt.init((slow_params, fast_params))
+    if cfg.train.train_inner_lr:
+        outer_opt_state = outer_opt.init((slow_params, fast_params, inner_lr))
+    else:
+        outer_opt_state = outer_opt.init((slow_params, fast_params))
 
     # (slow_params, fast_params, slow_state, fast_state, outer_opt_state) = [
     #     jax.device_put(t, device)
@@ -685,11 +719,12 @@ if __name__ == "__main__":
     replicate_array_test = lambda x: jnp.broadcast_to(
         x, (cfg.val.fsl.batch_size,) + x.shape
     )
-    (rep_slow_params, rep_fast_params, rep_outer_opt_state,) = tree_map(
+    (rep_slow_params, rep_fast_params, rep_inner_lr, rep_outer_opt_state,) = tree_map(
         replicate_array,
         (
             slow_params,
             fast_params,
+            inner_lr,
             outer_opt_state,
         ),
     )
@@ -763,6 +798,7 @@ if __name__ == "__main__":
             rep_outer_opt_state,
             rep_slow_params,
             rep_fast_params,
+            rep_inner_lr,
             rep_slow_state,
             rep_fast_state,
             info,
@@ -772,6 +808,7 @@ if __name__ == "__main__":
             rep_outer_opt_state,
             rep_slow_params,
             rep_fast_params,
+            rep_inner_lr,
             rep_slow_state,
             rep_fast_state,
             x_spt,
@@ -795,6 +832,7 @@ if __name__ == "__main__":
             rng_tree = jax.tree_unflatten(tree_struct, split(rng_reset, len(tree_flat)))
             slow_params = jax.tree_map(lambda xs: xs[0], rep_slow_params)
             fast_params = jax.tree_map(lambda xs: xs[0], rep_fast_params)
+            inner_lr = jax.tree_map(lambda xs: xs[0], rep_inner_lr)
             test_fast_params = jax.tree_multimap(
                 partial(reset_all, head_initializer, None), rng_tree, fast_params
             )
@@ -804,6 +842,7 @@ if __name__ == "__main__":
                 rng_test_1,
                 slow_params,
                 test_fast_params,
+                inner_lr,
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
@@ -820,6 +859,7 @@ if __name__ == "__main__":
                 rng_test_5,
                 slow_params,
                 test_fast_params,
+                inner_lr,
                 test_slow_state,
                 test_fast_state,
                 num_batches=cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
@@ -833,35 +873,35 @@ if __name__ == "__main__":
                 ),
             )
 
-            # exp.log("Fitting Multinomial Regression")
-            # fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
-            #     rng_test_lr_1,
-            #     partial(embeddings_fn, slow_params, slow_state),
-            #     test_sample_fn_5_w_1_s,
-            #     cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-            #     pool=cfg.pool_lr,
-            #     # n_jobs=cfg.n_jobs_lr,
-            # )
-            # fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
-            #     rng_test_lr_5,
-            #     partial(embeddings_fn, slow_params, slow_state),
-            #     test_sample_fn_5_w_5_s,
-            #     cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
-            #     pool=cfg.pool_lr,
-            #     # n_jobs=cfg.n_jobs_lr,
-            # )
+            exp.log("Fitting Multinomial Regression")
+            fsl_lr_1_preds, fsl_lr_1_targets = test_fsl_embeddings(
+                rng_test_lr_1,
+                partial(embeddings_fn, slow_params, slow_state),
+                test_sample_fn_5_w_1_s,
+                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+                pool=0,
+                # n_jobs=cfg.n_jobs_lr,
+            )
+            fsl_lr_5_preds, fsl_lr_5_targets = test_fsl_embeddings(
+                rng_test_lr_5,
+                partial(embeddings_fn, slow_params, slow_state),
+                test_sample_fn_5_w_5_s,
+                cfg.val.fsl.num_tasks // cfg.val.fsl.batch_size,
+                pool=0,
+                # n_jobs=cfg.n_jobs_lr,
+            )
 
             fsl_maml_loss_1 = fsl_maml_1_res[0].mean()
             fsl_maml_acc_1 = fsl_maml_1_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
             fsl_maml_loss_5 = fsl_maml_5_res[0].mean()
             fsl_maml_acc_5 = fsl_maml_5_res[1]["outer"]["final"]["aux"][0]["acc"].mean()
 
-            # fsl_lr_1_acc = (fsl_lr_1_preds == fsl_lr_1_targets).astype(onp.float).mean()
-            # fsl_lr_5_acc = (fsl_lr_5_preds == fsl_lr_5_targets).astype(onp.float).mean()
+            fsl_lr_1_acc = (fsl_lr_1_preds == fsl_lr_1_targets).astype(onp.float).mean()
+            fsl_lr_5_acc = (fsl_lr_5_preds == fsl_lr_5_targets).astype(onp.float).mean()
 
             exp.log(f"\nValidation step {counter} results:")
-            # exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
-            # exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
+            exp.log(f"Multinomial Regression 5-way-1-shot acc: {fsl_lr_1_acc}")
+            exp.log(f"Multinomial Regression 5-way-5-shot acc: {fsl_lr_5_acc}")
             exp.log(
                 f"{val_way}-way-1-shot acc: {fsl_maml_acc_1}, loss: {fsl_maml_loss_1}"
             )
@@ -871,43 +911,47 @@ if __name__ == "__main__":
 
             exp.log_metrics(
                 {
-                    # "5w5s-lr-acc": fsl_lr_5_acc,
-                    # "5w1s-lr-acc": fsl_lr_1_acc,
+                    "5w5s-lr-acc": fsl_lr_5_acc,
+                    "5w1s-lr-acc": fsl_lr_1_acc,
                     "acc_5": fsl_maml_acc_5,
                     "acc_1": fsl_maml_acc_1,
                     "loss_5": fsl_maml_loss_5,
                     "loss_1": fsl_maml_loss_1,
+                    "inner_lr": inner_lr,
                 },
                 step=counter,
                 prefix="val",
             )
 
-            # if fsl_lr_5_acc > best_val_acc:
-            if fsl_maml_acc_5 > best_val_acc:
-                # best_val_acc = fsl_lr_5_acc
-                best_val_acc = fsl_maml_acc_5
-                exp.log(f"\  New best {val_way}-way-5-shot validation accuracy: {best_val_acc}")
-                exp.log("Saving checkpoint\n")
-                with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
-                    dill.dump(
-                        {
-                            "val_acc_1": fsl_maml_acc_1,
-                            "val_loss_1": fsl_maml_loss_1,
-                            "val_acc_5": fsl_maml_acc_5,
-                            "val_loss_5": fsl_maml_loss_5,
-                            # "val_lr_5w5s_acc": fsl_lr_5_acc,
-                            # "val_lr_5w1s_acc": fsl_lr_1_acc,
-                            "optimizer_state": outer_opt_state,
-                            "slow_params": slow_params,
-                            "fast_params": fast_params,
-                            "slow_state": slow_state,
-                            "fast_state": fast_state,
-                            "rng": rng,
-                            "counter": counter,
-                        },
-                        f,
-                        protocol=3,
-                    )
+            if fsl_lr_5_acc > best_val_acc:
+                # if fsl_maml_acc_5 > best_val_acc:
+                best_val_acc = fsl_lr_5_acc
+                # best_val_acc = fsl_maml_acc_5
+                exp.log(
+                    f"\  New best {val_way}-way-5-shot validation accuracy: {best_val_acc}"
+                )
+                if not cfg.no_log:
+                    exp.log("Saving checkpoint\n")
+                    with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
+                        dill.dump(
+                            {
+                                "val_acc_1": fsl_maml_acc_1,
+                                "val_loss_1": fsl_maml_loss_1,
+                                "val_acc_5": fsl_maml_acc_5,
+                                "val_loss_5": fsl_maml_loss_5,
+                                # "val_lr_5w5s_acc": fsl_lr_5_acc,
+                                # "val_lr_5w1s_acc": fsl_lr_1_acc,
+                                "optimizer_state": outer_opt_state,
+                                "slow_params": slow_params,
+                                "fast_params": fast_params,
+                                "slow_state": slow_state,
+                                "fast_state": fast_state,
+                                "rng": rng,
+                                "counter": counter,
+                            },
+                            f,
+                            protocol=3,
+                        )
 
         # print(counter, i)
         if ((counter == 1) and (i == cfg.train.apply_every)) or (
@@ -928,9 +972,11 @@ if __name__ == "__main__":
                 prefix="train",
             )
 
+            inner_lr = jax.tree_map(lambda xs: xs[0], rep_inner_lr)
             current_lr = schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
+                inner_lr=f"{inner_lr:.4f}",
                 loss=f"{train_loss:.2f}",
                 foa=f"{train_final_outer_acc:.2f}",
                 va1=f"{fsl_maml_acc_1:.2f}",
@@ -939,3 +985,9 @@ if __name__ == "__main__":
                 # vlr1=f"{fsl_lr_1_acc:.2f}",
                 refresh=False,
             )
+
+
+if __name__ == "__main__":
+    # parser = parse_args()
+    args, cfg = parse_args()
+    main(args, cfg)

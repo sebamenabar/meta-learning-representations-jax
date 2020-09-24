@@ -60,11 +60,14 @@ class Experiment:
         self.exp_name = cfg.exp_name
         self.work_dir = osp.dirname(osp.dirname(osp.realpath(__file__)))
 
-        self.on_create()
+        if not cfg.no_log:
+            self.on_create()
 
         self.comet = None
+        self.tensorboard = None
         self.wandb = None
         self.logfile = None
+        self.logging = None
 
     def logfile_init(self, backends=None):
         self.logfile = open(osp.join(self.exp_dir, "logfile.log"), "a")
@@ -81,7 +84,10 @@ class Experiment:
         self.log()
 
     def log(self, *args, **kwargs):
-        return print(*args, file=self.logging, **kwargs)
+        if self.logging:
+            return print(*args, file=self.logging, **kwargs)
+        else:
+            return print(*args, **kwargs)
         # return print(*args, **kwargs)
 
     @staticmethod
@@ -89,6 +95,7 @@ class Experiment:
         if parser is None:
             parser = ArgumentParser(conflict_handler="resolve")
 
+        parser.add_argument("--no_log", action="store_true", default=False)
         parser.add_argument("--seed", type=int, default=0)
         parser.add_argument("--debug", action="store_true", default=False)
         # parser.add_argument("--val_interval", type=int, default=500)
@@ -123,15 +130,17 @@ class Experiment:
         return self.cfg.logcomet
 
     def log_metrics(self, metrics, step=None, prefix=""):
-        self.comet.log_metrics(metrics, step=step, prefix=prefix)
-        for name, val in metrics.items():
-            if prefix:
-                tag = f"{prefix}_{name}"
-            else:
-                tag = name
-            self.tensorboard.add_scalar(
-                tag=tag, scalar_value=val, global_step=step,
-            )
+        if self.comet:
+            self.comet.log_metrics(metrics, step=step, prefix=prefix)
+        if self.tensorboard:
+            for name, val in metrics.items():
+                if prefix:
+                    tag = f"{prefix}_{name}"
+                else:
+                    tag = name
+                self.tensorboard.add_scalar(
+                    tag=tag, scalar_value=val, global_step=step,
+                )
 
     def loggers_init(self):
         self.comet_init()
