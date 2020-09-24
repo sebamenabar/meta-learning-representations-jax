@@ -112,7 +112,7 @@ def parse_args(parser=None):
         default=15,
     )
     parser.add_argument("--val.fsl.num_inner_steps", type=int, default=10)
-    parser.add_argument("--val.fsl.num_tasks", type=int, default=600)
+    parser.add_argument("--val.fsl.num_tasks", type=int, default=300)
 
     parser.add_argument("--model.name", choices=["resnet12", "convnet4"])
     parser.add_argument("--model.output_size", type=int)

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from jax.random import split
 import haiku as hk
 
-from .layers import build_initializer
+from .layers import build_initializer, MyBatchNorm, Affine
 from .activations import activations
 from typing import Optional, Sequence
 
@@ -235,35 +235,46 @@ class ConvBlock(hk.Module):
             stride=self.conv_stride,
             padding="SAME",
             w_init=self.initializer,
-            b_init=hk.initializers.Constant(0.0),
+            # b_init=hk.initializers.Constant(0.0),
         )(x)
         if not self.norm_before_act:
             x = self.activation(x)
+
         if self.normalize == "bn":
+            print("batch norm")
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.999
+                decay_rate=0.9
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(x, is_training=is_training, test_local_stats=not self.track_stats,)
 
         elif self.normalize == "gn":
+            print("group norm")
             x = hk.GroupNorm(groups=4)(x)
         elif self.normalize == "in":
+            print("in norm")
             x = hk.InstanceNorm(create_scale=True, create_offset=True)(x)
         elif self.normalize == "ln":
+            print("ln norm")
             x = hk.LayerNorm(
                 axis=slice(1, None, None), create_scale=True, create_offset=True
             )(x)
         elif self.normalize == "custom":
-            x = CustomNorm(
+            print("custom norm")
+            x = MyBatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.999,
-                use_stats_during_training=True,
+                decay_rate=0.9,
+                # use_stats_during_training=False,
                 #  axis=slice(1, None, None),
             )(x, is_training)
+        elif self.normalize == "affine":
+            print("Affine norm")
+            x = Affine()(x)
+        else:
+            print("No norm")
 
         if self.norm_before_act:
             x = self.activation(x)
@@ -361,7 +372,7 @@ class MiniImagenetCNNBody(hk.Module):
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.999
+                decay_rate=0.9
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(x, is_training=is_training, test_local_stats=not self.track_stats,)

@@ -83,8 +83,9 @@ def parse_args():
     parser.add_argument(
         "--model.name", default="resnet12", choices=["convnet4", "resnet12"]
     )
-    parser.add_argument("--model.hidden_size", default=32, type=int)
+    parser.add_argument("--model.hidden_size", default=64, type=int)
     parser.add_argument("--model.no_track_bn_stats", default=False, action="store_true")
+    parser.add_argument("--model.normalization", default="bn", choices=["bn", "custom", "gn", "in", "ln"])
     parser.add_argument(
         "--model.activation",
         type=str,
@@ -102,7 +103,7 @@ def parse_args():
     parser.add_argument("--lr_schedule", nargs="*", type=int, default=[60, 80])
     parser.add_argument("--momentum", default=0.9, type=float)
     parser.add_argument("--weight_decay", default=5e-4, type=float)
-    parser.add_argument("--val_interval", default=5, type=int)  # In epochs
+    parser.add_argument("--val_interval", default=1, type=int)  # In epochs
     parser.add_argument(
         "--data_augment", default=False, action="store_true"
     )  # In epochs
@@ -189,11 +190,13 @@ if __name__ == "__main__":
         cfg.model.name,
         cfg.dataset,
         output_size,
+        hidden_size=cfg.model.hidden_size,
         avg_pool=True,
         activation=cfg.model.activation,
         initializer="kaiming_normal",
         track_stats=not cfg.model.no_track_bn_stats,
         head_bias=True,
+        normalize=cfg.model.normalization,
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
@@ -208,8 +211,8 @@ if __name__ == "__main__":
     )
     # schedule = ox.cosine_decay_schedule(-cfg.lr, cfg.epochs, 0.01)
     opt = ox.chain(
-        ox.trace(decay=cfg.momentum, nesterov=False),
         ox.additive_weight_decay(cfg.weight_decay),
+        ox.trace(decay=cfg.momentum, nesterov=False),
         ox.scale_by_schedule(schedule),
     )
     opt_state = opt.init(params)
@@ -352,6 +355,11 @@ if __name__ == "__main__":
                 )
 
             pbar.update()
+
+        exp.log("\n")
+        exp.log(f"---------- Epoch {epoch} ----------")
+        exp.log(pbar.format_meter(**pbar.format_dict))
+        exp.log(f"\nCurrent learning rate: {schedule(schedule_state.count)}")
 
     with open(osp.join(exp.exp_dir, "checkpoints/last.ckpt"), "wb") as f:
         dill.dump(

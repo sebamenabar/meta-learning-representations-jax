@@ -38,6 +38,8 @@ def prepare_model(
             w_initializer=initializer,
             activation=activation,
             test_local_stats=not track_stats,
+            normalize=normalize,
+
         )
     elif model_name == "convnet4":
         model = hk.transform_with_state(

@@ -6,6 +6,14 @@ import haiku as hk
 from typing import Optional, Sequence
 
 
+class Affine(hk.Module):
+    def __call__(self, x):
+        w_dtype = x.dtype
+        scale = hk.get_parameter("scale", (x.shape[-1],), w_dtype, jnp.ones)
+        offset = hk.get_parameter("offset", (x.shape[-1],), w_dtype, jnp.zeros)
+        return (x * scale) + offset
+
+
 def build_initializer(nonlinearity, name, truncated=False):
     if name == "glorot_uniform":
         return hk.initializers.VarianceScaling(1.0, "fan_avg", "uniform")
@@ -254,6 +262,9 @@ class MyBatchNorm(hk.Module):
         if is_training:
             self.mean_ema(mean)
             self.var_ema(var)
+
+        mean = self.mean_ema.average
+        var = self.var_ema.average
 
         w_shape = [1 if i in axis else inputs.shape[i] for i in range(inputs.ndim)]
         w_dtype = inputs.dtype
