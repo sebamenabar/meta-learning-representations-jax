@@ -38,6 +38,7 @@ from lib import (
     meta_step,
     reset_by_idxs,
     reset_all,
+    delayed_cosine_decay_schedule,
     # outer_loop_reset_per_task,
 )
 from data import prepare_data, augment as augment_fn, preprocess_images
@@ -427,9 +428,10 @@ def main(args, cfg):
 
     # Optimizers
     if cfg.train.scheduler == "cosine":
-        schedule = ox.cosine_decay_schedule(
+        schedule = delayed_cosine_decay_schedule(
             -cfg.train.outer_lr,
-            cfg.train.num_outer_steps * cfg.train.apply_every,
+            cfg.train.cosine_transition_begin * cfg.train.apply_every,
+            cfg.train.cosine_decay_steps * cfg.train.apply_every, 
             cfg.train.cosine_alpha,
         )
     elif cfg.train.scheduler == "step":
@@ -778,8 +780,8 @@ def main(args, cfg):
             # x_cl = jax.device_put(x_cl, device)
             # y_cl = jax.device_put(y_cl, device)
             _, _, x_cl_qry, y_cl_qry = cl_build_ins(x_cl, y_cl)
-            x_qry = onp.concatenate((x_qry, x_cl_qry), 1)
-            y_qry = onp.concatenate((y_qry, y_cl_qry), 1)
+            x_qry = onp.concatenate((x_spt, x_qry, x_cl_qry), 1)
+            y_qry = onp.concatenate((y_spt, y_qry, y_cl_qry), 1)
 
         spt_classes = onp.unique(y_spt, axis=1)
         # x_spt, x_qry = preprocess_images_jins(rng_augment, x_spt, x_qry)
@@ -926,6 +928,7 @@ def main(args, cfg):
             if fsl_lr_5_acc > best_val_acc:
                 # if fsl_maml_acc_5 > best_val_acc:
                 best_val_acc = fsl_lr_5_acc
+                outer_opt_state = jax.tree_map(lambda xs: xs[0, 0], rep_outer_opt_state)
                 # best_val_acc = fsl_maml_acc_5
                 exp.log(
                     f"\  New best {val_way}-way-5-shot validation accuracy: {best_val_acc}"
@@ -973,6 +976,7 @@ def main(args, cfg):
             )
 
             inner_lr = jax.tree_map(lambda xs: xs[0], rep_inner_lr)
+            outer_opt_state = jax.tree_map(lambda xs: xs[0, 0], rep_outer_opt_state)
             current_lr = schedule(outer_opt_state[-1].count)
             pbar.set_postfix(
                 lr=f"{current_lr:.4f}",
