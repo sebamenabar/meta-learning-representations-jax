@@ -167,8 +167,8 @@ def parse_args(parser=None):
     return args, cfg
 
 
-if __name__ == "__main__":
-    args, cfg = parse_args()
+def main(args, cfg):
+    # args, cfg = parse_args()
     # cfg = parse_and_build_cfg(args)
     # The Experiment class creates a directory for the experiment,
     # copies source files and creates configurations files
@@ -334,3 +334,7 @@ if __name__ == "__main__":
                 qry_shot=cfg.train.cl.qry_shot,
             )
         )
+
+if __name__ == "__main__":
+    args, cfg = parse_args()
+    main(args, cfg)
