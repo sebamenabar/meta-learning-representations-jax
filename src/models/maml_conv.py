@@ -201,7 +201,7 @@ class ConvBlock(hk.Module):
         self.max_pool = max_pool
         self.max_pool_factor = max_pool_factor
         self.normalize = normalize
-        self.stride = stride = (int(2 * max_pool_factor), int(2 * max_pool_factor), 1)
+        self.stride = stride = (1, int(2 * max_pool_factor), int(2 * max_pool_factor), 1)
         self.norm_before_act = norm_before_act
         # if activation == "relu":
         #     self.activation = jax.nn.relu
@@ -241,7 +241,7 @@ class ConvBlock(hk.Module):
             x = self.activation(x)
 
         if self.normalize == "bn":
-            print("batch norm")
+            # print("batch norm")
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
@@ -255,18 +255,18 @@ class ConvBlock(hk.Module):
             )
 
         elif self.normalize == "gn":
-            print("group norm")
+            # print("group norm")
             x = hk.GroupNorm(groups=4)(x)
         elif self.normalize == "in":
-            print("in norm")
+            # print("in norm")
             x = hk.InstanceNorm(create_scale=True, create_offset=True)(x)
         elif self.normalize == "ln":
-            print("ln norm")
+            # print("ln norm")
             x = hk.LayerNorm(
                 axis=slice(1, None, None), create_scale=True, create_offset=True
             )(x)
         elif self.normalize == "custom":
-            print("custom norm")
+            # print("custom norm")
             x = MyBatchNorm(
                 create_scale=True,
                 create_offset=True,
@@ -275,10 +275,11 @@ class ConvBlock(hk.Module):
                 #  axis=slice(1, None, None),
             )(x, is_training)
         elif self.normalize == "affine":
-            print("Affine norm")
+            # print("Affine norm")
             x = Affine()(x)
         else:
-            print("No norm")
+            pass
+            # print("No norm")
 
         if self.norm_before_act:
             x = self.activation(x)
@@ -373,7 +374,7 @@ class MiniImagenetCNNBody(hk.Module):
             x = hk.avg_pool(
                 x,
                 jnp.array([1, 5, 5, 1]),
-                jnp.ones(1, dtype=jnp.int8),
+                (1, 1, 1, 1),
                 padding="VALID",
                 channel_axis=3,
             )
@@ -382,7 +383,7 @@ class MiniImagenetCNNBody(hk.Module):
             x = hk.BatchNorm(
                 create_scale=True,
                 create_offset=True,
-                decay_rate=0.9
+                decay_rate=0.999
                 if self.track_stats
                 else 0.0,  # 0 for no tracking of stats
             )(
@@ -449,7 +450,7 @@ def make_miniimagenet_cnn(
     head_bias=True,
     norm_before_act=True,
     final_norm=False,
-    normalize=True,
+    normalize="bn",
 ):
     MiniImagenetCNNBody_t = hk.transform_with_state(
         lambda x, is_training: MiniImagenetCNNBody(
