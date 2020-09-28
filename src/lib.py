@@ -166,6 +166,7 @@ def batched_outer_loop(
         by_qry,
         bspt_classes,
     )
+
     return losses.mean(), aux
 
 
@@ -204,6 +205,7 @@ def outer_loop(
     rng_outer_slow, rng_outer_fast, rng_inner = split(rng, 3)
     # To have proper statitics on the first step we need to compute
     # them before the first inner loop
+
     slow_outputs, outer_slow_state = slow_apply(
         slow_params,
         slow_state,
@@ -211,6 +213,7 @@ def outer_loop(
         x_qry,
         is_training,
     )
+
     if "outer" in track_slow_state:
         print("Using outer statistics")
         slow_state = outer_slow_state
@@ -251,6 +254,7 @@ def outer_loop(
         is_training,
         y_qry,
     )
+
     return (
         final_loss,
         (
@@ -516,17 +520,27 @@ def meta_step(
 
 
 def reset_by_idxs(w_make_fn, idxs, rng, array):
-    print("Resetting head by indexes")
-    return jax.ops.index_update(
-        array,
-        jax.ops.index[:, idxs],
-        w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
-    )
+    if len(array.shape) > 1:
+        print("Resetting classifier by indexes")
+        return jax.ops.index_update(
+            array,
+            jax.ops.index[:, idxs],
+            w_make_fn(dtype=array.dtype)(rng, (array.shape[0], idxs.shape[0])),
+        )
+    else:
+        print("Not resetting bias")
+        # Dont reset bias
+        return array
 
 
 def reset_all(w_make_fn, idxs, rng, array):
-    print("Resetting all head")
-    return w_make_fn(dtype=array.dtype)(rng, array.shape)
+    if len(array.shape) > 1:
+        print("Resetting all classifier")
+        return w_make_fn(dtype=array.dtype)(rng, array.shape)
+    else:
+        print("Not resetting bias")
+        # Dont reset bias
+        return array
 
 
 def delayed_cosine_decay_schedule(
