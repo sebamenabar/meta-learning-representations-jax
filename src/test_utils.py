@@ -80,10 +80,10 @@ def test_fsl_embeddings(
     n_jobs=None,
 ):
 
-    if pool > 0:
-        pool = Pool(pool)
-    else:
-        pool = None
+    # if pool > 0:
+    #     pool = Pool(pool)
+    # else:
+    #     pool = None
 
     if classifier == "LR":
         fit_fn = lr_fit_eval
@@ -117,15 +117,15 @@ def test_fsl_embeddings(
 
         targets.append(y_qry)
 
-        if pool is not None:
+        # if pool is not None:
+        #     preds.append(
+        #         pool.starmap_async(fit_fn, zip(spt_features, y_spt, qry_features))
+        #     )
+        # else:
+        for i in range(batch_size):
             preds.append(
-                pool.starmap_async(fit_fn, zip(spt_features, y_spt, qry_features))
+                lr_fit_eval(spt_features[i], y_spt[i], qry_features[i])
             )
-        else:
-            for i in range(batch_size):
-                preds.append(
-                    lr_fit_eval(spt_features[i], y_spt[i], qry_features[i], n_jobs=n_jobs)
-                )
 
     if pool is not None:
         preds = onp.concatenate([onp.stack(p.get(5)) for p in preds])
@@ -135,7 +135,7 @@ def test_fsl_embeddings(
     return preds, targets
 
 
-def lr_fit_eval(X, y, X_test, n_jobs=None, predict_train=False):
+def lr_fit_eval(X, y, X_test, predict_train=False):
     clf = LogisticRegression(
         penalty="l2",
         random_state=0,
@@ -144,7 +144,7 @@ def lr_fit_eval(X, y, X_test, n_jobs=None, predict_train=False):
         max_iter=1000,
         class_weight="balanced",
         multi_class="multinomial",
-        n_jobs=n_jobs,
+        # n_jobs=n_jobs,
     )
     clf.fit(X, y)
     query_y_pred = clf.predict(X_test)
@@ -159,10 +159,10 @@ def forward_loader(pred_fn, loader, device, is_norm=False, normalize_fn=None):
     all_preds = []
     all_targets = []
     for X, y in loader:
-        X = jax.device_put(X, device)
-        X = X / 255
-        if normalize_fn:
-            X = normalize_fn(X)
+        # X = jax.device_put(X, device)
+        # X = X / 255
+        # if normalize_fn:
+        #     X = normalize_fn(X)
         preds = pred_fn(X)
         if is_norm:
             preds = normalize(preds.reshape(preds.shape[0], -1))
