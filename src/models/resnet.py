@@ -50,7 +50,7 @@ class BasicBlock(hk.Module):
         bn_config.setdefault("create_offset", True)
         bn_config.setdefault(
             "decay_rate",
-            0.9,  # Pytorch uses 0.9 by default, Haiku ResNet had 0.999
+            0.999,  # Pytorch uses 0.9 by default, Haiku ResNet had 0.999
         )
 
         self.normalize = normalize
