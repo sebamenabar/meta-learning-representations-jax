@@ -9,6 +9,10 @@ from argparse import ArgumentParser
 from easydict import EasyDict as edict
 
 import jax
+import jax.numpy as jnp
+from jax.random import split
+
+import chex
 
 from config import rsetattr
 from mrcl_experiment import MetaLearner
@@ -129,6 +133,8 @@ def parse_args(parser=None):
         choices=["none", "inner", "outer", "inner", "inner-outer"],
     )
 
+    parser.add_argument("--fake_pmap_jit", action="store_true", default=False)
+
     args = parser.parse_args()
     cfg = edict(train=edict(cl=edict()), val=edict(fsl=edict()), model=edict())
     for argname, argval in vars(args).items():
@@ -155,6 +161,10 @@ def main(args, cfg):
     except RuntimeError:
         pass
 
+    # if cfg.fake_pmap_jit:
+    #     chex.fake_pmap().context.start()
+    #     chex.fake_jit().context.start()
+
     meta_learner = MetaLearner(
         cfg.seed,
         cfg.dataset,
@@ -163,16 +173,36 @@ def main(args, cfg):
         cfg.train,
     )
 
+    rng = rng_step = None
     counter = 0
-    for i in range(1, cfg.train.num_outer_steps * meta_learner._apply_every + 1):
+    pbar = tqdm(range(cfg.train.num_outer_steps), ncols=0)
+    # for i in range(1, cfg.train.num_outer_steps * meta_learner._apply_every + 1):
+    for global_step in pbar:
         
-        meta_learner.step(global_step=0, rng=None)
+        if rng is not None:
+            rng, rng_step = split(rng)
+        rng, scalars = meta_learner.step(global_step=global_step, rng=rng_step)
         
-        if (i % cfg.train.apply_every) == 0:
-            pbar.update()
-            counter += 1
+        # if (i % meta_learner._apply_every) == 0:
+        if (global_step % 1) == 0:
+            inner_scalars = jax.tree_map(lambda x: jnp.mean(x, (0, 1)), scalars["inner"]) 
+            outer_scalars = jax.tree_map(jnp.mean, scalars["outer"]) 
 
-        break
+            pbar.update()
+            # counter += 1
+
+            pbar.set_postfix(
+                foa=outer_scalars["final"]["aux"][0]["acc"].item(),
+                fol=outer_scalars["final"]["loss"].item(),
+                ioa=outer_scalars["initial"]["aux"][0]["acc"].item(),
+                iol=outer_scalars["initial"]["loss"].item(),
+
+                iia=inner_scalars["auxs"][0]["acc"][0].item(),
+                fia=inner_scalars["auxs"][0]["acc"][-1].item(),
+
+                ilr=meta_learner._learner_state.inner_lr,
+                olr=meta_learner._scheduler(global_step)
+            )
 
 
 if __name__ == "__main__":
