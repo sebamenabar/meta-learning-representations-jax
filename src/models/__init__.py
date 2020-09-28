@@ -15,18 +15,18 @@ def make_resnet12(test_local_stats, is_feat=False, *args, **kwargs):
 
 
 def prepare_model(
-    model_name,
     dataset,
+    model_name,
     output_size,
     avg_pool,
-    activation,
     initializer,
+    activation="relu",
     hidden_size=None,
-    track_stats=False,
+    track_stats="none", # ["none", "inner", "outer", "inner", "inner-outer"]
     head_bias=True,
     norm_before_act=None,
     final_norm=False,
-    normalize=True,
+    normalize="bn",
 ):
     if dataset == "miniimagenet":
         max_pool = True
@@ -37,17 +37,20 @@ def prepare_model(
             avg_pool=True,
             w_initializer=initializer,
             activation=activation,
-            test_local_stats=not track_stats,
+            test_local_stats=track_stats == "none",
             normalize=normalize,
 
         )
     elif model_name == "convnet4":
+
+        print(track_stats != "none")
+
         model = hk.transform_with_state(
             lambda x, is_training: MiniImagenetCNNBody(
                 hidden_size=hidden_size,
                 max_pool=max_pool,
                 activation=activation,
-                track_stats=track_stats,
+                track_stats=track_stats != "none",
                 initializer=initializer,
                 norm_before_act=norm_before_act,
                 final_norm=final_norm,
@@ -74,12 +77,12 @@ def prepare_model(
     return model, head
 
 
-def make_params(rng, dataset, slow_init, slow_apply, fast_init):
+def make_params(rng, dataset, slow_init, slow_apply, fast_init, setup_tensor):
     slow_rng, fast_rng = split(rng)
-    if dataset == "miniimagenet":
-        setup_tensor = jnp.zeros((2, 84, 84, 3))
-    elif dataset == "omniglot":
-        setup_tensor = jnp.zeros((2, 28, 28, 1))
+    # if dataset == "miniimagenet":
+    #     setup_tensor = jnp.zeros((2, 84, 84, 3))
+    # elif dataset == "omniglot":
+    #     setup_tensor = jnp.zeros((2, 28, 28, 1))
     slow_params, slow_state = slow_init(slow_rng, setup_tensor, True)
     slow_outputs, _ = slow_apply(slow_params, slow_state, slow_rng, setup_tensor, True)
     fast_params, fast_state = fast_init(fast_rng, *slow_outputs, True)
