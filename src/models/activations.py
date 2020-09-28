@@ -12,7 +12,7 @@ activations = [
     "sigmoid",
     "soft_sign",
     "softplus",
-    "silu",
+    # "silu",
     "swish",
 ]
 
