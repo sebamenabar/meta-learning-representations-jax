@@ -104,6 +104,10 @@ class MetaLearner:
             )
             assert ragged == 0
 
+        print(
+            f"Applying gradient every {self._apply_every} sub steps with sub batch size {self._sub_batch_size}"
+        )
+
         num_devices = jax.device_count()
         global_batch_size = self._sub_batch_size
         self.per_device_batch_size, ragged = divmod(global_batch_size, num_devices)
@@ -116,12 +120,13 @@ class MetaLearner:
 
         self._scheduler = self._make_scheduler()
         self._optimizer = ox.chain(
-            ox.clip(10),
-            ox.scale(1 / self._apply_every),
             ox.apply_every(self._apply_every),
+            ox.scale(1 / self._apply_every),
+            # ox.clip(10),
             #  ox.additive_weight_decay(self.train_cfg.weight_decay),
             ox.scale_by_adam(),
             ox.scale_by_schedule(self._scheduler),
+            ox.apply_every(self._apply_every),  # This is to prevent updates by momentum
         )
 
         self.update_pmap = jax.pmap(jax.partial(self._update_fn), axis_name="i")
@@ -248,10 +253,17 @@ class MetaLearner:
 
         grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
         # if learn_inner_lr:
+        opt_state = learner_state.opt_state
+        # Replace schedule state to global step to allow gradient accumulation
+        #  print(global_step)
+        # opt_state[-1] = jax.tree_map(
+        #     lambda x: jnp.full_like(x, global_step, x.dtype), opt_state[-1]
+        # )
+
         if self.train_cfg.learn_inner_lr:
             updates, opt_state = self._optimizer.update(
                 grads,
-                learner_state.opt_state,
+                opt_state,
                 (
                     learner_state.slow_params,
                     learner_state.fast_params,
@@ -269,20 +281,20 @@ class MetaLearner:
         else:
             updates, opt_state = self._optimizer.update(
                 grads,
-                learner_state.opt_state,
+                opt_state,
                 (
                     learner_state.slow_params,
                     learner_state.fast_params,
                 ),
             )
-        slow_params, fast_params = ox.apply_updates(
-            (
-                learner_state.slow_params,
-                learner_state.fast_params,
-            ),
-            updates,
-        )
-        inner_lr = learner_state.inner_lr
+            slow_params, fast_params = ox.apply_updates(
+                (
+                    learner_state.slow_params,
+                    learner_state.fast_params,
+                ),
+                updates,
+            )
+            inner_lr = learner_state.inner_lr
 
         out = (
             MetaLearnerState(
@@ -302,32 +314,52 @@ class MetaLearner:
         if self._train_input is None or self._learner_state is None or rng is None:
             rng = self._initialize_train()
 
-        rng, rng_step = split(rng, 2)
-
         host_id = jax.host_id()
         local_device_count = jax.local_device_count()
 
+        step_device = onp.broadcast_to(global_step, [local_device_count])
+
+        rng, rng_step = split(rng, 2)
         step_rng_device = jax.random.split(rng_step, num=jax.device_count())
         step_rng_device = step_rng_device[
             host_id * local_device_count : (host_id + 1) * local_device_count
         ]
-        step_device = onp.broadcast_to(global_step, [local_device_count])
 
-        inputs = next(self._train_input)
-        spt_classes = onp.unique(inputs[1], axis=1)
-        inputs = reshape_inputs(inputs)
-        (spt_classes,) = reshape_inputs([spt_classes])
+        accumulated_scalars = []
+        _opt_state = self._learner_state.opt_state
+        for j in range(self._apply_every):
+            inputs = next(self._train_input)
+            spt_classes = onp.unique(inputs[1], axis=1)
+            inputs = reshape_inputs(inputs)
+            (spt_classes,) = reshape_inputs([spt_classes])
 
-        self._learner_state, scalars = self.update_pmap(
-            self._learner_state,
-            step_device,
-            step_rng_device,
-            inputs,
-            spt_classes,
-            # normalize_fn=self._normalize_fn,
+            self._learner_state, scalars = self.update_pmap(
+                self._learner_state,
+                step_device,
+                step_rng_device,
+                inputs,
+                spt_classes,
+                # normalize_fn=self._normalize_fn,
+            )
+            accumulated_scalars.append(scalars)
+
+            if j < (self._apply_every - 1):
+                _learner_state = self._learner_state._asdict()
+                _opt_state = (
+                    (_learner_state["opt_state"][0],)
+                    + tuple(_opt_state[1:-1])
+                    + (_learner_state["opt_state"][-1],)
+                )
+                _learner_state["opt_state"] = _opt_state
+                self._learner_state = MetaLearnerState(**_learner_state)
+
+        accumulated_scalars = jax.tree_multimap(
+            lambda x, *xs: jnp.concatenate(xs, 1),
+            accumulated_scalars[0],
+            *accumulated_scalars,
         )
 
-        return rng, scalars
+        return rng, accumulated_scalars
 
     def _initialize_train(self):
         rng = jax.random.PRNGKey(self._random_seed)
@@ -428,8 +460,8 @@ class MetaLearner:
         if self.train_cfg.scheduler == "cosine":
             return delayed_cosine_decay_schedule(
                 -self.train_cfg.outer_lr,
-                self.train_cfg.cosine_transition_begin * self._apply_every,
-                self.train_cfg.cosine_decay_steps * self._apply_every,
+                self.train_cfg.cosine_transition_begin,  # * self._apply_every,
+                self.train_cfg.cosine_decay_steps,  # * self._apply_every,
                 self.train_cfg.cosine_alpha,
             )
         elif self.train_cfg.scheduler == "step":
@@ -441,7 +473,9 @@ class MetaLearner:
                 },
             )
         elif self.train_cfg.scheduler == "none":
-            return ox.piecewise_constant_schedule(-self.train_cfg.outer_lr)
+            return ox.piecewise_constant_schedule(-self.train_cfg.outer_lr, {})
+        else:
+            raise AttributeError(f"Unspecified scheduler {self.train_cfg.scheduler}")
 
     # def _optimizer(self):
     #     return ox.chain(
