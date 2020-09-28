@@ -763,7 +763,7 @@ def main(args, cfg):
             pbar.update()
             counter += 1
 
-        rng, rng_step, rng_sample, rng_augment, rng_sample_cl = split(rng, 5)
+        rng, rng_step, rng_sample,pudate rng_augment, rng_sample_cl = split(rng, 5)
         if cfg.train.prefetch > 0:
             x, y = next(train_input)
         else:
