@@ -372,7 +372,7 @@ class MetaLearner:
             if self._prefetch > 0:
                 from acme.jax import utils as acme_utils
 
-                self._train_input = acme_utils.prefetch(_train_input)
+                self._train_input = acme_utils.prefetch(iter(_train_input))
             else:
                 self._train_input = _train_input
         if self._learner_state is None:
@@ -578,6 +578,9 @@ class MetaMiniImageNet:
         self.fsl_build = jax.partial(
             fsl_build, batch_size=batch_size, way=way, shot=shot, qry_shot=qry_shot
         )
+
+    def __iter__(self):
+        return self
 
     def __next__(self):
         self._rng, rng = split(self._rng)

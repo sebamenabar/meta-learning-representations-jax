@@ -73,7 +73,7 @@ def parse_args(parser=None):
     parser.add_argument(
         "--train.augment", default="none", choices=["none", "all", "spt", "qry"]
     )
-    parser.add_argument("--train.prefetch", default=10, type=int)
+    # parser.add_argument("--train.prefetch", default=10, type=int)
 
     parser.add_argument("--train.val_interval", type=int, default=1000)
     parser.add_argument("--train.method", default="maml", choices=["maml", "mrcl"])
