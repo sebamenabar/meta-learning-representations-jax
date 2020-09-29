@@ -256,7 +256,7 @@ def main(args, cfg):
 
         if (
             (global_step == 0)
-            or ((((global_step + 1) % cfg.train.val_interval) == 0) % global_step != 1)
+            or ((((global_step + 1) % cfg.train.val_interval) == 0) and (global_step != 1))
             or (global_step == (cfg.train.num_outer_steps - 1))
         ):
             learner_state = meta_learner.get_first_state()
