@@ -63,6 +63,9 @@ def augment(rng, imgs, color_jitter_prob=1.0):
 
 
 def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_fn=None):
+    
+    print("start of preprocess images")
+    
     x_spt = x_spt / 255
     x_qry = x_qry / 255
     if augment == "all":
@@ -83,5 +86,7 @@ def preprocess_images(rng, x_spt, x_qry, normalize_fn, augment="none", augment_f
 
     x_spt = normalize_fn(x_spt)
     x_qry = normalize_fn(x_qry)
+
+    print("end of preprocess images")
 
     return x_spt, x_qry

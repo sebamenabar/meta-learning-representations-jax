@@ -96,8 +96,9 @@ class LRTester:
     ):
         x_spt, x_qry = x_spt / 255, x_qry / 255
         # if self.n_aug_samples:
+        print(f"Evaluating LR {n_aug_samples} augmented samples keep orig {keep_orig_aug}")
         if n_aug_samples:
-            print("Augmenting testing samples")
+            # print("Augmenting testing samples")
             # aug_x_spt = x_spt.repeat(self.n_aug_samples, 1)
             aug_x_spt = x_spt.repeat(n_aug_samples, 1)
             # aug_y_spt = y_spt.repeat(self.n_aug_samples, 1)
@@ -212,10 +213,13 @@ class MAMLTester:
         x_qry,
         y_qry,
     ):
+
+
         x_spt, x_qry = x_spt / 255, x_qry / 255
         # if self.n_aug_samples:
+        print(f"Evaluating MAML {n_aug_samples} augmented samples keep orig {keep_orig_aug}")
         if n_aug_samples:
-            print("Augmenting testing samples")
+            # print("Augmenting testing samples")
             # aug_x_spt = x_spt.repeat(self.n_aug_samples, 1)
             aug_x_spt = x_spt.repeat(n_aug_samples, 1)
             # aug_y_spt = y_spt.repeat(self.n_aug_samples, 1)
@@ -231,6 +235,7 @@ class MAMLTester:
             else:
                 x_spt = aug_x_spt
                 y_spt = aug_y_spt
+        
 
         # x_spt = self.normalize_fn(x_spt)
         # x_qry = self.normalize_fn(x_qry)

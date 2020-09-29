@@ -151,6 +151,9 @@ def batched_outer_loop(
     bspt_classes,
     outer_loop,
 ):
+
+    print("in batch outer loop")
+
     def helper(slow_state, fast_state, *args):
         return outer_loop(
             slow_params, fast_params, inner_lr, slow_state, fast_state, inner_opt_state, *args
@@ -166,6 +169,8 @@ def batched_outer_loop(
         by_qry,
         bspt_classes,
     )
+
+    print("batch outer loop end")
 
     return losses.mean(), aux
 
@@ -191,6 +196,9 @@ def outer_loop(
     reset_fast_params_fn=None,
     track_slow_state="none",
 ):
+
+    print("in outer loop")
+
     if reset_fast_params_fn:
         rng, rng_reset = split(rng)
         tree_flat, tree_struct = jax.tree_flatten(fast_params)
@@ -206,6 +214,8 @@ def outer_loop(
     # To have proper statitics on the first step we need to compute
     # them before the first inner loop
 
+    print("before slow outputs")
+
     slow_outputs, outer_slow_state = slow_apply(
         slow_params,
         slow_state,
@@ -213,6 +223,7 @@ def outer_loop(
         x_qry,
         is_training,
     )
+    print("after slow outputs")
 
     if "outer" in track_slow_state:
         print("Using outer statistics")
@@ -235,6 +246,9 @@ def outer_loop(
         x_spt,
         y_spt,
     )
+
+    print("after inner loop")
+
     if "inner" in track_slow_state:
         print("Using inner statistics")
         slow_state = inner_slow_state
@@ -254,6 +268,8 @@ def outer_loop(
         is_training,
         y_qry,
     )
+
+    print("outer loop end")
 
     return (
         final_loss,
@@ -290,6 +306,9 @@ def fsl_inner_loop(
     update_state=False,
     return_history=True,
 ):
+
+    print("inner loop")
+
     _fast_apply_and_loss_fn = partial(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
     )
@@ -305,10 +324,16 @@ def fsl_inner_loop(
     losses = []
     auxs = []
 
+    print("after slow outputs")
+
+
     for i in range(num_steps):
         (loss, (new_fast_state, *aux)), grads = value_and_grad(
             _fast_apply_and_loss_fn, has_aux=True
         )(fast_params, fast_state, rngs[i], slow_outputs, is_training, targets)
+        
+        print("begin inner loop", i)
+        
         if update_state:
             fast_state = new_fast_state
         if i == 0:
@@ -321,6 +346,8 @@ def fsl_inner_loop(
 
         updates, opt_state = opt_update_fn(inner_lr, grads, opt_state, fast_params)
         fast_params = ox.apply_updates(fast_params, updates)
+
+        print("end inner loop", i)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
         fast_params,
@@ -344,6 +371,8 @@ def fsl_inner_loop(
                 "auxs": {"initial": initial_aux, "final": final_aux},
             },
         )
+
+    print("end of inner loop")
 
     return (
         fast_params,

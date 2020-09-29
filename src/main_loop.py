@@ -226,7 +226,7 @@ def main(args, cfg):
         keep_orig_aug=False,
     )
 
-    rng = rng_step = None
+    rng = rng_step = jax.random.PRNGKey(0)  # Get's replaced in first step with seed
     counter = 0
     pbar = tqdm(range(cfg.train.num_outer_steps), ncols=0)
     # for i in range(1, cfg.train.num_outer_steps * meta_learner._apply_every + 1):
@@ -245,13 +245,17 @@ def main(args, cfg):
         ):
             learner_state = meta_learner.get_first_state()
 
+            exp.log()
+            exp.log("Evaluation Logistic Regression No-Aug")
             lr_no_aug_acc, lr_no_aug_std = lr_tester_no_aug.eval(
                 learner_state.slow_params, learner_state.slow_state
             )
+            exp.log("Evaluation Logistic Regression Aug")
             lr_aug_acc, lr_aug_std = lr_tester_aug.eval(
                 learner_state.slow_params, learner_state.slow_state
             )
 
+            exp.log("Evaluation MAML No-Aug")
             maml_acc_no_aug, maml_std_no_aug = maml_tester_no_aug.eval(
                 learner_state.slow_params,
                 learner_state.fast_params,
@@ -265,6 +269,7 @@ def main(args, cfg):
                 ),
                 learner_state.inner_lr,
             )
+            exp.log("Evaluation MAML Aug")
             maml_acc_aug, maml_std_aug = maml_tester_aug.eval(
                 learner_state.slow_params,
                 learner_state.fast_params,
@@ -296,7 +301,8 @@ def main(args, cfg):
                     maml_acc_aug=maml_acc_aug,
                     maml_std_aug=maml_std_aug,
                 ),
-                step=global_step, prefix="val",
+                step=global_step,
+                prefix="val",
             )
             exp.log()
 

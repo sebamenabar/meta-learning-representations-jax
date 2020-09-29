@@ -131,7 +131,7 @@ class MetaLearner:
             ox.apply_every(self._apply_every),  # This is to prevent updates by momentum
         )
 
-        self.update_pmap = jax.pmap(jax.partial(self._update_fn), axis_name="i")
+        # self.update_pmap = jax.pmap(jax.partial(self._update_fn), axis_name="i")
 
     # def normalize_fn(self, *args, **kwargs):
     #     return self._normalize_fn(*args, **kwargs)
@@ -167,24 +167,24 @@ class MetaLearner:
         inner_opt = ox.sgd(lr)
         return inner_opt.update(updates, state, params)
 
-    # @staticmethod
+    @staticmethod
     def _update_fn(
-        self,
+        #  self,
         learner_state,
         global_step,
         rng,
         inputs,
         spt_classes,
-        # normalize_fn,
-        # augment,
-        # augment_fn,
-        # num_inner_steps,
-        # slow_apply,
-        # fast_apply,
-        # opt_update_fn,
-        # reset_fast_params_fn,
-        # learn_inner_lr,
-        # optimizer,
+        normalize_fn,
+        augment,
+        augment_fn,
+        num_inner_steps,
+        slow_apply,
+        fast_apply,
+        opt_update_fn,
+        reset_fast_params_fn,
+        learn_inner_lr,
+        optimizer,
     ):
         x_spt, y_spt, x_qry, y_qry = inputs
 
@@ -194,48 +194,51 @@ class MetaLearner:
             rng_aug,
             x_spt,
             x_qry,
-            self._normalize_fn,
-            # normalize_fn,
-            augment=self.train_cfg.augment,
-            # augment=augment,
-            # augment_fn=augment_fn,
-            augment_fn=augment,
+            # self._normalize_fn,
+            normalize_fn,
+            # augment=self.train_cfg.augment,
+            augment=augment,
+            augment_fn=augment_fn,
+            # augment_fn=augment,
         )
 
         _inner_loop = jax.partial(
             fsl_inner_loop,
             is_training=True,
-            num_steps=self.train_cfg.num_inner_steps,
-            # num_steps=num_inner_steps,
-            slow_apply=self._encoder.apply,
-            # slow_apply=slow_apply,
-            fast_apply=self._classifier.apply,
-            # fast_apply=fast_apply,
+            # num_steps=self.train_cfg.num_inner_steps,
+            num_steps=num_inner_steps,
+            # slow_apply=self._encoder.apply,
+            slow_apply=slow_apply,
+            # fast_apply=self._classifier.apply,
+            fast_apply=fast_apply,
             loss_fn=mean_xe_and_acc_dict,
-            opt_update_fn=self.inner_opt_update_fn,
-            # opt_update_fn=opt_update_fn,
+            # opt_update_fn=self.inner_opt_update_fn,
+            opt_update_fn=opt_update_fn,
         )
         _outer_loop = jax.partial(
             outer_loop,
             is_training=True,
             inner_loop=_inner_loop,
-            slow_apply=self._encoder.apply,
-            # slow_apply=slow_apply,
-            fast_apply=self._classifier.apply,
-            # fast_apply=fast_apply,
+            # slow_apply=self._encoder.apply,
+            slow_apply=slow_apply,
+            # fast_apply=self._classifier.apply,
+            fast_apply=fast_apply,
             loss_fn=mean_xe_and_acc_dict,
-            reset_fast_params_fn=self.reset_classifier,
-            # reset_fast_params_fn=reset_fast_params_fn,
+            # reset_fast_params_fn=self.reset_classifier,
+            reset_fast_params_fn=reset_fast_params_fn,
         )
         _batched_outer_loop = jax.partial(batched_outer_loop, outer_loop=_outer_loop)
 
         inner_opt_state = ox.sgd(0).init(learner_state.fast_params)
 
-        # if learn_inner_lr:
-        if self.train_cfg.learn_inner_lr:
+        if learn_inner_lr:
+            # if self.train_cfg.learn_inner_lr:
             positions = (0, 1, 2)
         else:
             positions = (0, 1)
+
+        print("Before grad")
+
         (outer_loss, (slow_state, fast_state, info)), grads = jax.value_and_grad(
             _batched_outer_loop, positions, has_aux=True
         )(
@@ -253,17 +256,22 @@ class MetaLearner:
             spt_classes,
         )
 
+        print("After grad")
+
         grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
-        # if learn_inner_lr:
         opt_state = learner_state.opt_state
+
+        print("after pmean")
         # Replace schedule state to global step to allow gradient accumulation
         #  print(global_step)
         # opt_state[-1] = jax.tree_map(
         #     lambda x: jnp.full_like(x, global_step, x.dtype), opt_state[-1]
         # )
 
-        if self.train_cfg.learn_inner_lr:
-            updates, opt_state = self._optimizer.update(
+        if learn_inner_lr:
+            # if self.train_cfg.learn_inner_lr:
+            # updates, opt_state = self._optimizer.update(
+            updates, opt_state = optimizer.update(
                 grads,
                 opt_state,
                 (
@@ -281,7 +289,8 @@ class MetaLearner:
                 updates,
             )
         else:
-            updates, opt_state = self._optimizer.update(
+            # updates, opt_state = self._optimizer.update(
+            updates, opt_state = optimizer.update(
                 grads,
                 opt_state,
                 (
@@ -309,6 +318,8 @@ class MetaLearner:
             ),
             info,
         )
+
+        print("end of _update_fn")
 
         return out
 
@@ -385,21 +396,23 @@ class MetaLearner:
 
             self._learner_state = init_fn(rng_init, x_spt[:, 0])
 
-        # update_fn_kwargs = dict(
-        #     normalize_fn=self._normalize_fn,
-        #     augment=self.train_cfg.augment,
-        #     augment_fn=augment,
-        #     num_inner_steps=self.train_cfg.num_inner_steps,
-        #     slow_apply=self._encoder.apply,
-        #     fast_apply=self._classifier.apply,
-        #     opt_update_fn=self.inner_opt_update_fn,
-        #     reset_fast_params_fn=self.reset_classifier,
-        #     learn_inner_lr=self.train_cfg.learn_inner_lr,
-        #     optimizer=self._optimizer,
-        # )
-        # self.update_pmap = jax.pmap(
-        #     jax.partial(self._update_fn, **update_fn_kwargs), axis_name="i"
-        # )
+        update_fn_kwargs = dict(
+            normalize_fn=self._normalize_fn,
+            augment=self.train_cfg.augment,
+            augment_fn=augment,
+            num_inner_steps=self.train_cfg.num_inner_steps,
+            slow_apply=self._encoder.apply,
+            fast_apply=self._classifier.apply,
+            opt_update_fn=self.inner_opt_update_fn,
+            reset_fast_params_fn=self.reset_classifier,
+            learn_inner_lr=self.train_cfg.learn_inner_lr,
+            optimizer=self._optimizer,
+        )
+        self.update_pmap = jax.pmap(
+            jax.partial(self._update_fn, **update_fn_kwargs),
+            axis_name="i",
+            # static_broadcasted_argnums=range(5, 15),
+        )
 
         return get_host_rng(rng_train)
 
