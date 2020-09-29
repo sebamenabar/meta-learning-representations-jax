@@ -16,6 +16,13 @@ from lib import (
 )
 from test_utils import lr_fit_eval
 
+from tqdm.autonotebook import tqdm
+
+
+# @jax.jit
+def normalize(x):
+    norm = jax.numpy.linalg.norm(x, axis=-1, keepdims=True)
+    return x / norm
 
 class LRTester:
     def __init__(
@@ -27,6 +34,7 @@ class LRTester:
         n_aug_samples,
         normalize_fn,
         keep_orig_aug=True,
+        final_normalize=True,
     ):
         self.slow_apply = slow_apply
         self.num_tasks = num_tasks
@@ -36,14 +44,17 @@ class LRTester:
         self.n_aug_samples = n_aug_samples
         self.normalize_fn = normalize_fn
         self.keep_orig_aug = keep_orig_aug
+        self.final_normalize = final_normalize
 
-        self.encode_batch = jax.jit(
+        # self.encode_batch = jax.jit(
+        self.encode_batch = (
             jax.partial(
                 self._encode_batch,
                 n_aug_samples,
                 normalize_fn,
                 slow_apply,
                 keep_orig_aug,
+                final_normalize
             )
         )
 
@@ -52,7 +63,7 @@ class LRTester:
         # self.dataset.rng = rng_data
         preds = []
         targets = []
-        for i in range(self.num_tasks // self.batch_size):
+        for i in tqdm(range(self.num_tasks // self.batch_size)):
             rng, rng_step = split(rng)
             x_spt, y_spt, x_qry, y_qry = next(self.dataset)
             spt_features, y_spt, qry_features, y_qry = self.encode_batch(
@@ -86,6 +97,7 @@ class LRTester:
         normalize_fn,
         slow_apply,
         keep_orig_aug,
+        final_normalize,
         rng,
         slow_params,
         slow_state,
@@ -124,6 +136,10 @@ class LRTester:
         qry_features = jax.vmap(
             jax.partial(slow_apply, slow_params, slow_state, None, is_training=False)
         )(x_qry)[0][0]
+
+        if final_normalize:
+            spt_features = normalize(spt_features)
+            qry_features = normalize(qry_features)
 
         return spt_features, y_spt, qry_features, y_qry
 
@@ -169,7 +185,7 @@ class MAMLTester:
         results = []
         rng, rng_data = split(jax.random.PRNGKey(0), 2)
         # self.dataset.rng = rng_data
-        for i in range(self.num_tasks // self.batch_size):
+        for i in tqdm(range(self.num_tasks // self.batch_size)):
             rng, rng_step = split(rng)
             x_spt, y_spt, x_qry, y_qry = next(self.dataset)
             results.append(

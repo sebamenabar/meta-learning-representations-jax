@@ -12,7 +12,9 @@ import jax
 import jax.numpy as jnp
 from jax.random import split
 
-import chex
+import haiku as hk
+
+# import chex
 
 from config import rsetattr
 from mrcl_experiment import MetaLearner, replicate_array, MetaMiniImageNet
@@ -94,7 +96,7 @@ def parse_args(parser=None):
 
     # parser.add_argument("--val.pool", type=int, default=4)
     parser.add_argument(
-        "--val.batch_size", help="Number of FSL tasks", default=10, type=int
+        "--val.batch_size", help="Number of FSL tasks", default=4, type=int
     )
     # parser.add_argument(
     #     "--val.fsl.qry_shot",
@@ -190,7 +192,8 @@ def main(args, cfg):
     lr_tester_no_aug = LRTester(
         meta_learner._encoder.apply,
         cfg.val.num_tasks,
-        cfg.val.batch_size,
+        # cfg.val.batch_size,
+        1,
         val_dataset,
         0,
         val_dataset._normalize,
@@ -198,7 +201,8 @@ def main(args, cfg):
     lr_tester_aug = LRTester(
         meta_learner._encoder.apply,
         cfg.val.num_tasks,
-        cfg.val.batch_size,
+        # cfg.val.batch_size,
+        1,
         val_dataset,
         5,
         val_dataset._normalize,
@@ -218,7 +222,8 @@ def main(args, cfg):
         meta_learner._encoder.apply,
         meta_learner._classifier.apply,
         cfg.val.num_tasks,
-        cfg.val.batch_size,
+        # cfg.val.batch_size,
+        1,
         val_dataset,
         cfg.val.num_inner_steps,
         5,
@@ -226,6 +231,7 @@ def main(args, cfg):
         keep_orig_aug=False,
     )
 
+    scalars_ema = None
     rng = rng_step = jax.random.PRNGKey(0)  # Get's replaced in first step with seed
     counter = 0
     pbar = tqdm(range(cfg.train.num_outer_steps), ncols=0)
@@ -236,24 +242,34 @@ def main(args, cfg):
             rng, rng_step = split(rng)
         rng, scalars = meta_learner.step(global_step=global_step, rng=rng_step)
 
+        if scalars_ema is None:
+            scalars_ema = jax.tree_map(
+                lambda x: x,
+                scalars,
+            )
+        else:
+            scalars_ema = jax.tree_multimap(
+                lambda ema, x: ema * 0.99 + x * 0.01, scalars_ema, scalars
+            )
+
         # if (i % meta_learner._apply_every) == 0:
 
         if (
             (global_step == 0)
-            or (((global_step - 1) % cfg.train.val_interval) == 0)
+            or ((((global_step + 1) % cfg.train.val_interval) == 0) % global_step != 1)
             or (global_step == (cfg.train.num_outer_steps - 1))
         ):
             learner_state = meta_learner.get_first_state()
 
             exp.log()
-            exp.log("Evaluation Logistic Regression No-Aug")
-            lr_no_aug_acc, lr_no_aug_std = lr_tester_no_aug.eval(
-                learner_state.slow_params, learner_state.slow_state
-            )
-            exp.log("Evaluation Logistic Regression Aug")
-            lr_aug_acc, lr_aug_std = lr_tester_aug.eval(
-                learner_state.slow_params, learner_state.slow_state
-            )
+            # exp.log("Evaluation Logistic Regression No-Aug")
+            # lr_no_aug_acc, lr_no_aug_std = lr_tester_no_aug.eval(
+            #     learner_state.slow_params, learner_state.slow_state
+            # )
+            # exp.log("Evaluation Logistic Regression Aug")
+            # lr_aug_acc, lr_aug_std = lr_tester_aug.eval(
+            #     learner_state.slow_params, learner_state.slow_state
+            # )
 
             exp.log("Evaluation MAML No-Aug")
             maml_acc_no_aug, maml_std_no_aug = maml_tester_no_aug.eval(
@@ -269,37 +285,37 @@ def main(args, cfg):
                 ),
                 learner_state.inner_lr,
             )
-            exp.log("Evaluation MAML Aug")
-            maml_acc_aug, maml_std_aug = maml_tester_aug.eval(
-                learner_state.slow_params,
-                learner_state.fast_params,
-                jax.tree_map(
-                    jax.partial(replicate_array, num_devices=cfg.val.batch_size),
-                    learner_state.slow_state,
-                ),
-                jax.tree_map(
-                    jax.partial(replicate_array, num_devices=cfg.val.batch_size),
-                    learner_state.fast_state,
-                ),
-                learner_state.inner_lr,
-            )
+            # exp.log("Evaluation MAML Aug")
+            # maml_acc_aug, maml_std_aug = maml_tester_aug.eval(
+            #     learner_state.slow_params,
+            #     learner_state.fast_params,
+            #     jax.tree_map(
+            #         jax.partial(replicate_array, num_devices=cfg.val.batch_size),
+            #         learner_state.slow_state,
+            #     ),
+            #     jax.tree_map(
+            #         jax.partial(replicate_array, num_devices=cfg.val.batch_size),
+            #         learner_state.fast_state,
+            #     ),
+            #     learner_state.inner_lr,
+            # )
 
             exp.log(f"\nStep {global_step + 1} statistics:")
             exp.log(f"MAML No-Aug Acc: {maml_acc_no_aug}±{maml_std_no_aug}")
-            exp.log(f"MAML Aug Acc: {maml_acc_aug}±{maml_std_aug}")
-            exp.log(f"Logistic Regression No-Aug Acc: {lr_no_aug_acc}±{lr_no_aug_std}")
-            exp.log(f"Logistic Regression Aug Acc: {lr_aug_acc}±{lr_aug_std}")
+            # exp.log(f"MAML Aug Acc: {maml_acc_aug}±{maml_std_aug}")
+            # exp.log(f"Logistic Regression No-Aug Acc: {lr_no_aug_acc}±{lr_no_aug_std}")
+            # exp.log(f"Logistic Regression Aug Acc: {lr_aug_acc}±{lr_aug_std}")
 
             exp.log_metrics(
                 dict(
-                    lr_no_aug_acc=lr_no_aug_acc,
-                    lr_no_aug_std=lr_no_aug_std,
-                    lr_aug_acc=lr_aug_acc,
-                    lr_aug_std=lr_aug_std,
+                    # lr_no_aug_acc=lr_no_aug_acc,
+                    # lr_no_aug_std=lr_no_aug_std,
+                    # lr_aug_acc=lr_aug_acc,
+                    # lr_aug_std=lr_aug_std,
                     maml_acc_no_aug=maml_acc_no_aug,
                     maml_std_no_aug=maml_std_no_aug,
-                    maml_acc_aug=maml_acc_aug,
-                    maml_std_aug=maml_std_aug,
+                    # maml_acc_aug=maml_acc_aug,
+                    # maml_std_aug=maml_std_aug,
                 ),
                 step=global_step,
                 prefix="val",
@@ -312,9 +328,9 @@ def main(args, cfg):
             or ((global_step % cfg.train.val_interval) == 0)
         ):
             inner_scalars = jax.tree_map(
-                lambda x: jnp.mean(x, (0, 1)), scalars["inner"]
+                lambda x: jnp.mean(x, (0, 1)), scalars_ema["inner"]
             )
-            outer_scalars = jax.tree_map(jnp.mean, scalars["outer"])
+            outer_scalars = jax.tree_map(jnp.mean, scalars_ema["outer"])
 
             pbar.update()
             # counter += 1

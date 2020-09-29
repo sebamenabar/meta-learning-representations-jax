@@ -323,7 +323,7 @@ class ResNet(hk.Module):
         x = self.layer4(x, is_training, test_local_stats)
         f3 = x
         if self.avg_pool:
-            x = hk.avg_pool(x, (1, 5, 5, 1), 1, padding="VALID", channel_axis=3)
+            x = hk.avg_pool(x, jax.numpy.array([1, 5, 5, 1]), 1, padding="VALID", channel_axis=3)
             x = hk.Reshape((640,))(x)
         else:
             x = hk.Reshape((-1,))(x)
