@@ -77,6 +77,7 @@ class MetaLearner:
         data_root,
         model_cfg,
         train_cfg,
+        val_cfg,
         # data_cfg,
         # sub_batch_size=None,
     ):
@@ -85,6 +86,7 @@ class MetaLearner:
         # self.data_cfg = data_cfg
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
+        self.val_cfg = val_cfg
         self._random_seed = random_seed
 
         self._encoder, self._classifier = prepare_model(dataset_name, **model_cfg)
@@ -408,8 +410,9 @@ class MetaLearner:
         if self._dataset == "miniimagenet":
             if self.train_cfg.method == "maml":
                 logging.info("Preparing MAML MiniImageNet")
+                rng_train, rng_val = split(rng)
                 dataset = MetaMiniImageNet(
-                    rng,
+                    rng_train,
                     "train",
                     self._data_root,
                     self.per_device_batch_size * jax.local_device_count(),
@@ -419,6 +422,15 @@ class MetaLearner:
                     #  self.train_cfg.method == "maml",
                 )
                 self._normalize_fn = dataset._normalize
+                # self.val_dataset = MetaMiniImageNet(
+                #     rng_val,
+                #     "val",
+                #     self._data_root,
+                #     self.val_cfg.batch_size,
+                #     self.train_cfg.way,
+                #     self.train_cfg.shot,
+                #     self.train_cfg.qry_shot,
+                # )
 
         return dataset
 
@@ -539,6 +551,11 @@ class MetaMiniImageNet:
             self._fp = osp.join(
                 data_root,
                 "miniImageNet_category_split_train_phase_train_ordered.pickle",
+            )
+        elif split == "val":
+            self._fp = osp.join(
+                data_root,
+                "miniImageNet_category_split_val_ordered.pickle",
             )
         self._images, self._labels, self._normalize = prepare_data(
             "miniimagenet", self._fp

@@ -19,7 +19,14 @@ from test_utils import lr_fit_eval
 
 class LRTester:
     def __init__(
-        self, slow_apply, num_tasks, batch_size, dataset, n_aug_samples, normalize_fn
+        self,
+        slow_apply,
+        num_tasks,
+        batch_size,
+        dataset,
+        n_aug_samples,
+        normalize_fn,
+        keep_orig_aug=True,
     ):
         self.slow_apply = slow_apply
         self.num_tasks = num_tasks
@@ -28,9 +35,16 @@ class LRTester:
         self.dataset = dataset
         self.n_aug_samples = n_aug_samples
         self.normalize_fn = normalize_fn
+        self.keep_orig_aug = keep_orig_aug
 
         self.encode_batch = jax.jit(
-            jax.partial(self._encode_batch, n_aug_samples, normalize_fn, slow_apply)
+            jax.partial(
+                self._encode_batch,
+                n_aug_samples,
+                normalize_fn,
+                slow_apply,
+                keep_orig_aug,
+            )
         )
 
     def eval(self, slow_params, slow_state):
@@ -63,13 +77,15 @@ class LRTester:
 
         preds = onp.stack(preds)
         targets = onp.concatenate(targets)
-        return (preds == targets).astype(onp.float).mean()
+        taskwise_acc = (preds == targets).astype(onp.float).mean(1)
+        return taskwise_acc.mean(), taskwise_acc.std()
 
     @staticmethod
     def _encode_batch(
         n_aug_samples,
         normalize_fn,
         slow_apply,
+        keep_orig_aug,
         rng,
         slow_params,
         slow_state,
@@ -91,8 +107,12 @@ class LRTester:
                 *aug_x_spt.shape
             )
 
-            x_spt = jnp.concatenate((x_spt, aug_x_spt), axis=1)
-            y_spt = jnp.concatenate((y_spt, aug_y_spt), axis=1)
+            if keep_orig_aug:
+                x_spt = jnp.concatenate((x_spt, aug_x_spt), axis=1)
+                y_spt = jnp.concatenate((y_spt, aug_y_spt), axis=1)
+            else:
+                x_spt = aug_x_spt
+                y_spt = aug_y_spt
 
         x_spt = normalize_fn(x_spt)
         x_qry = normalize_fn(x_qry)
@@ -118,6 +138,7 @@ class MAMLTester:
         num_inner_steps,
         n_aug_samples,
         normalize_fn,
+        keep_orig_aug=True,
     ):
         self.slow_apply = slow_apply
         self.fast_apply = fast_apply
@@ -128,6 +149,7 @@ class MAMLTester:
         self.num_inner_steps = num_inner_steps
         self.n_aug_samples = n_aug_samples
         self.normalize_fn = normalize_fn
+        self.keep_orig_aug = keep_orig_aug
 
         self.batch_adapt_jit = jax.jit(
             jax.partial(
@@ -137,6 +159,7 @@ class MAMLTester:
                 self.num_inner_steps,
                 self.slow_apply,
                 self.fast_apply,
+                self.keep_orig_aug,
             ),
             #  static_argnums=(0,),
         )
@@ -163,7 +186,11 @@ class MAMLTester:
                 )
             )
 
-        return results
+        results = jax.tree_multimap(
+            lambda x, *xs: jnp.concatenate(xs), results[0], *results
+        )
+        taskwise_acc = results["outer"]["final"]["aux"][0]["acc"]
+        return taskwise_acc.mean().item(), taskwise_acc.std().item()
 
     @staticmethod  # JIT recompiled every time with self
     def _batch_adapt(
@@ -173,6 +200,7 @@ class MAMLTester:
         num_inner_steps,
         slow_apply,
         fast_apply,
+        keep_orig_aug,
         rng,
         slow_params,
         fast_params,
@@ -197,8 +225,12 @@ class MAMLTester:
                 *aug_x_spt.shape
             )
 
-            x_spt = jnp.concatenate((x_spt, aug_x_spt), axis=1)
-            y_spt = jnp.concatenate((y_spt, aug_y_spt), axis=1)
+            if keep_orig_aug:
+                x_spt = jnp.concatenate((x_spt, aug_x_spt), axis=1)
+                y_spt = jnp.concatenate((y_spt, aug_y_spt), axis=1)
+            else:
+                x_spt = aug_x_spt
+                y_spt = aug_y_spt
 
         # x_spt = self.normalize_fn(x_spt)
         # x_qry = self.normalize_fn(x_qry)
