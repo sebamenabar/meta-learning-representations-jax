@@ -25,6 +25,8 @@ from experiment import Experiment, Logger
 def parse_args(parser=None):
     parser = Experiment.add_args(parser)
 
+    parser.add_argument("--worker_tpu_driver", default="")
+
     parser.add_argument("--train.num_outer_steps", type=int, default=30000)
     parser.add_argument(
         "--train.batch_size", help="Number of FSL tasks", default=4, type=int
@@ -149,6 +151,11 @@ def parse_args(parser=None):
 
 
 def main(args, cfg):
+    if cfg.worker_tpu_driver:
+        jax.config.update("jax_xla_backend", "tpu_driver")
+        jax.config.update("jax_backend_target", cfg.worker_tpu_driver)
+        print("Backend: %s %r", FLAGS.worker_tpu_driver, jax.devices())
+
     exp = Experiment(cfg, args)
     if not cfg.no_log:
         exp.logfile_init(
@@ -163,6 +170,10 @@ def main(args, cfg):
     exp.log(f"JAX available CPUS {jax.devices('cpu')}")
     try:
         exp.log(f"JAX available GPUS {jax.devices('gpu')}")
+    except RuntimeError:
+        pass
+    try:
+        exp.log(f"JAX available TPUS {jax.devices('tpu')}")
     except RuntimeError:
         pass
 
@@ -184,19 +195,22 @@ def main(args, cfg):
         "val",
         cfg.data_dir,
         cfg.val.batch_size,
-        5, 5, 15,
+        5,
+        5,
+        15,
         # cfg.train.way,
         # cfg.train.shot,
         # cfg.train.qry_shot,
-
     )
     val_dataset2 = MetaMiniImageNet(
         jax.random.PRNGKey(0),
         "val",
         cfg.data_dir,
         # cfg.val.batch_size,
-        5, # For augmented testing
-        5, 5, 15,
+        5,  # For augmented testing
+        5,
+        5,
+        15,
         # cfg.train.way,
         # cfg.train.shot,
         # cfg.train.qry_shot,
@@ -224,7 +238,7 @@ def main(args, cfg):
         meta_learner._encoder.apply,
         meta_learner._classifier.apply,
         cfg.val.num_tasks,
-        # cfg.val.batch_size,
+        #  cfg.val.batch_size,
         val_dataset,
         cfg.val.num_inner_steps,
         0,
@@ -234,7 +248,7 @@ def main(args, cfg):
         meta_learner._encoder.apply,
         meta_learner._classifier.apply,
         cfg.val.num_tasks,
-        # cfg.val.batch_size,
+        #  cfg.val.batch_size,
         val_dataset,
         # cfg.val.num_inner_steps,
         10,
@@ -245,7 +259,7 @@ def main(args, cfg):
         meta_learner._encoder.apply,
         meta_learner._classifier.apply,
         cfg.val.num_tasks,
-        # cfg.val.batch_size,
+        #  cfg.val.batch_size,
         val_dataset,
         # cfg.val.num_inner_steps,
         20,
