@@ -12,6 +12,10 @@ import haiku as hk
 import optax as ox
 
 
+def replicate_array(x, num_devices):
+    return jnp.broadcast_to(x, (num_devices,) + x.shape)
+
+
 def parse_and_build_cfg(args):
     cfg = edict()
     for argname, argval in vars(args).items():
@@ -152,11 +156,17 @@ def batched_outer_loop(
     outer_loop,
 ):
 
-    print("in batch outer loop")
+    #  print("in batch outer loop")
 
     def helper(slow_state, fast_state, *args):
         return outer_loop(
-            slow_params, fast_params, inner_lr, slow_state, fast_state, inner_opt_state, *args
+            slow_params,
+            fast_params,
+            inner_lr,
+            slow_state,
+            fast_state,
+            inner_opt_state,
+            *args
         )
 
     losses, aux = vmap(helper)(
@@ -170,7 +180,7 @@ def batched_outer_loop(
         bspt_classes,
     )
 
-    print("batch outer loop end")
+    # print("batch outer loop end")
 
     return losses.mean(), aux
 
@@ -197,7 +207,7 @@ def outer_loop(
     track_slow_state="none",
 ):
 
-    print("in outer loop")
+    # print("in outer loop")
 
     if reset_fast_params_fn:
         rng, rng_reset = split(rng)
@@ -214,7 +224,7 @@ def outer_loop(
     # To have proper statitics on the first step we need to compute
     # them before the first inner loop
 
-    print("before slow outputs")
+    # print("before slow outputs")
 
     slow_outputs, outer_slow_state = slow_apply(
         slow_params,
@@ -223,7 +233,7 @@ def outer_loop(
         x_qry,
         is_training,
     )
-    print("after slow outputs")
+    # print("after slow outputs")
 
     if "outer" in track_slow_state:
         print("Using outer statistics")
@@ -247,7 +257,7 @@ def outer_loop(
         y_spt,
     )
 
-    print("after inner loop")
+    # print("after inner loop")
 
     if "inner" in track_slow_state:
         print("Using inner statistics")
@@ -269,7 +279,7 @@ def outer_loop(
         y_qry,
     )
 
-    print("outer loop end")
+    # print("outer loop end")
 
     return (
         final_loss,
@@ -307,7 +317,7 @@ def fsl_inner_loop(
     return_history=True,
 ):
 
-    print("inner loop")
+    # print("inner loop")
 
     _fast_apply_and_loss_fn = partial(
         fast_apply_and_loss_fn, fast_apply=fast_apply, loss_fn=loss_fn
@@ -324,16 +334,15 @@ def fsl_inner_loop(
     losses = []
     auxs = []
 
-    print("after slow outputs")
-
+    # print("after slow outputs")
 
     for i in range(num_steps):
         (loss, (new_fast_state, *aux)), grads = value_and_grad(
             _fast_apply_and_loss_fn, has_aux=True
         )(fast_params, fast_state, rngs[i], slow_outputs, is_training, targets)
-        
-        print("begin inner loop", i)
-        
+
+        # print("begin inner loop", i)
+
         if update_state:
             fast_state = new_fast_state
         if i == 0:
@@ -347,7 +356,7 @@ def fsl_inner_loop(
         updates, opt_state = opt_update_fn(inner_lr, grads, opt_state, fast_params)
         fast_params = ox.apply_updates(fast_params, updates)
 
-        print("end inner loop", i)
+        # print("end inner loop", i)
 
     final_loss, (final_fast_state, *final_aux) = _fast_apply_and_loss_fn(
         fast_params,
@@ -372,7 +381,7 @@ def fsl_inner_loop(
             },
         )
 
-    print("end of inner loop")
+    # print("end of inner loop")
 
     return (
         fast_params,
@@ -538,14 +547,24 @@ def meta_step(
         updates, outer_opt_state = outer_opt_update(
             grads, outer_opt_state, (slow_params, fast_params, inner_lr)
         )
-        slow_params, fast_params, inner_lr = ox.apply_updates((slow_params, fast_params, inner_lr), updates)
+        slow_params, fast_params, inner_lr = ox.apply_updates(
+            (slow_params, fast_params, inner_lr), updates
+        )
     else:
         updates, outer_opt_state = outer_opt_update(
             grads, outer_opt_state, (slow_params, fast_params)
         )
         slow_params, fast_params = ox.apply_updates((slow_params, fast_params), updates)
 
-    return outer_opt_state, slow_params, fast_params, inner_lr, slow_state, fast_state, info
+    return (
+        outer_opt_state,
+        slow_params,
+        fast_params,
+        inner_lr,
+        slow_state,
+        fast_state,
+        info,
+    )
 
 
 def reset_by_idxs(w_make_fn, idxs, rng, array):
@@ -597,7 +616,7 @@ def delayed_cosine_decay_schedule(
         raise ValueError("The cosine_decay_schedule requires positive decay_steps!")
 
     def schedule(count):
-        count = jnp.minimum(count - transition_begin + 1, decay_steps)
+        count = jnp.minimum(count - transition_begin, decay_steps)
         cosine_decay = 0.5 * (1 + jnp.cos(jnp.pi * count / decay_steps))
         decayed = (1 - alpha) * cosine_decay + alpha
         return jnp.where(count < 0, init_value, init_value * decayed)

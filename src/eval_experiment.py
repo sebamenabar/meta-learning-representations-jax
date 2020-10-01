@@ -6,6 +6,7 @@ from jax.random import split
 
 import optax as ox
 
+import time
 from data import augment
 from lib import (
     flatten,
@@ -13,6 +14,7 @@ from lib import (
     outer_loop,
     batched_outer_loop,
     mean_xe_and_acc_dict,
+    replicate_array,
 )
 from test_utils import lr_fit_eval
 
@@ -24,12 +26,13 @@ def normalize(x):
     norm = jax.numpy.linalg.norm(x, axis=-1, keepdims=True)
     return x / norm
 
+
 class LRTester:
     def __init__(
         self,
         slow_apply,
         num_tasks,
-        batch_size,
+        #  batch_size,
         dataset,
         n_aug_samples,
         normalize_fn,
@@ -38,7 +41,7 @@ class LRTester:
     ):
         self.slow_apply = slow_apply
         self.num_tasks = num_tasks
-        self.batch_size = batch_size
+        self.batch_size = dataset._batch_size
         self.num_tasks
         self.dataset = dataset
         self.n_aug_samples = n_aug_samples
@@ -46,26 +49,30 @@ class LRTester:
         self.keep_orig_aug = keep_orig_aug
         self.final_normalize = final_normalize
 
-        # self.encode_batch = jax.jit(
-        self.encode_batch = (
+        self.encode_batch = jax.jit(
+            # self.encode_batch = (
             jax.partial(
                 self._encode_batch,
                 n_aug_samples,
                 normalize_fn,
                 slow_apply,
                 keep_orig_aug,
-                final_normalize
+                final_normalize,
             )
         )
 
-    def eval(self, slow_params, slow_state):
+    def eval(self, slow_params, slow_state, num_tasks=None):
+        if num_tasks is None:
+            num_tasks = self.num_tasks
         rng, rng_data = split(jax.random.PRNGKey(0), 2)
         # self.dataset.rng = rng_data
         preds = []
         targets = []
-        for i in tqdm(range(self.num_tasks // self.batch_size)):
+        for i in tqdm(range(num_tasks // self.batch_size)):
             rng, rng_step = split(rng)
             x_spt, y_spt, x_qry, y_qry = next(self.dataset)
+
+            now = time.time()
             spt_features, y_spt, qry_features, y_qry = self.encode_batch(
                 rng_step,
                 slow_params,
@@ -76,14 +83,19 @@ class LRTester:
                 y_qry,
             )
 
+            # print("forward time:", time.time() - now)
+            now = time.time()
             spt_features = onp.array(spt_features)
             qry_features = onp.array(qry_features)
 
             y_spt = onp.array(y_spt)
             y_qry = onp.array(y_qry)
+            # print("move to cpu time:", time.time() - now)
 
             for i in range(x_spt.shape[0]):
+                now = time.time()
                 preds.append(lr_fit_eval(spt_features[i], y_spt[i], qry_features[i]))
+                # print("fit lr time:", time.time() - now)
             targets.append(y_qry)
 
         preds = onp.stack(preds)
@@ -108,7 +120,9 @@ class LRTester:
     ):
         x_spt, x_qry = x_spt / 255, x_qry / 255
         # if self.n_aug_samples:
-        print(f"Evaluating LR {n_aug_samples} augmented samples keep orig {keep_orig_aug}")
+        print(
+            f"Evaluating LR {n_aug_samples} augmented samples keep orig {keep_orig_aug}"
+        )
         if n_aug_samples:
             # print("Augmenting testing samples")
             # aug_x_spt = x_spt.repeat(self.n_aug_samples, 1)
@@ -150,23 +164,25 @@ class MAMLTester:
         slow_apply,
         fast_apply,
         num_tasks,
-        batch_size,
+        # batch_size,
         dataset,
         num_inner_steps,
         n_aug_samples,
         normalize_fn,
         keep_orig_aug=True,
+        reset_fn=None,
     ):
         self.slow_apply = slow_apply
         self.fast_apply = fast_apply
         self.num_tasks = num_tasks
-        self.batch_size = batch_size
+        self.batch_size = dataset._batch_size
         self.num_tasks
         self.dataset = dataset
         self.num_inner_steps = num_inner_steps
         self.n_aug_samples = n_aug_samples
         self.normalize_fn = normalize_fn
         self.keep_orig_aug = keep_orig_aug
+        self.reset_fn = reset_fn
 
         self.batch_adapt_jit = jax.jit(
             jax.partial(
@@ -177,17 +193,31 @@ class MAMLTester:
                 self.slow_apply,
                 self.fast_apply,
                 self.keep_orig_aug,
+                self.reset_fn,
             ),
             #  static_argnums=(0,),
         )
 
-    def eval(self, slow_params, fast_params, slow_state, fast_state, inner_lr):
+    def eval(
+        self, slow_params, fast_params, slow_state, fast_state, inner_lr, num_tasks=None
+    ):
+        if num_tasks is None:
+            num_tasks = self.num_tasks
+
+        slow_state = jax.tree_map(
+            jax.partial(replicate_array, num_devices=self.batch_size), slow_state
+        )
+        fast_state = jax.tree_map(
+            jax.partial(replicate_array, num_devices=self.batch_size), fast_state
+        )
+
         results = []
         rng, rng_data = split(jax.random.PRNGKey(0), 2)
         # self.dataset.rng = rng_data
-        for i in tqdm(range(self.num_tasks // self.batch_size)):
+        for i in tqdm(range(num_tasks // self.batch_size)):
             rng, rng_step = split(rng)
             x_spt, y_spt, x_qry, y_qry = next(self.dataset)
+            spt_classes = onp.unique(y_spt, axis=1)
             results.append(
                 self.batch_adapt_jit(
                     rng_step,
@@ -200,6 +230,7 @@ class MAMLTester:
                     y_spt,
                     x_qry,
                     y_qry,
+                    spt_classes,
                 )
             )
 
@@ -218,6 +249,7 @@ class MAMLTester:
         slow_apply,
         fast_apply,
         keep_orig_aug,
+        reset_fn,
         rng,
         slow_params,
         fast_params,
@@ -228,12 +260,13 @@ class MAMLTester:
         y_spt,
         x_qry,
         y_qry,
+        spt_classes=None,
     ):
-
-
         x_spt, x_qry = x_spt / 255, x_qry / 255
         # if self.n_aug_samples:
-        print(f"Evaluating MAML {n_aug_samples} augmented samples keep orig {keep_orig_aug}")
+        print(
+            f"Evaluating MAML {n_aug_samples} augmented samples keep orig {keep_orig_aug}"
+        )
         if n_aug_samples:
             # print("Augmenting testing samples")
             # aug_x_spt = x_spt.repeat(self.n_aug_samples, 1)
@@ -251,7 +284,6 @@ class MAMLTester:
             else:
                 x_spt = aug_x_spt
                 y_spt = aug_y_spt
-        
 
         # x_spt = self.normalize_fn(x_spt)
         # x_qry = self.normalize_fn(x_qry)
@@ -259,6 +291,9 @@ class MAMLTester:
         x_qry = normalize_fn(x_qry)
 
         inner_opt = ox.sgd(inner_lr)
+
+        # spt_classes = None
+        # spt_classes = onp.unique(y_spt, axis=1)
 
         def inner_opt_update_fn(lr, updates, state, params):
             return inner_opt.update(updates, state, params)
@@ -284,7 +319,7 @@ class MAMLTester:
             slow_apply=slow_apply,
             fast_apply=fast_apply,
             loss_fn=mean_xe_and_acc_dict,
-            # reset_fast_params_fn=self.reset_classifier,
+            reset_fast_params_fn=reset_fn,
         )
         _batched_outer_loop = jax.partial(batched_outer_loop, outer_loop=_outer_loop)
 
@@ -301,7 +336,7 @@ class MAMLTester:
             y_spt,
             x_qry,
             y_qry,
-            None,
+            spt_classes,
             # spt_classes,
         )
 

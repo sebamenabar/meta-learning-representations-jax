@@ -22,6 +22,7 @@ from lib import (
     mean_xe_and_acc_dict,
     reset_all,
     reset_by_idxs,
+    flatten,
 )
 from models import prepare_model, make_params
 from data import prepare_data, preprocess_images, augment
@@ -237,7 +238,7 @@ class MetaLearner:
         else:
             positions = (0, 1)
 
-        print("Before grad")
+        # print("Before grad")
 
         (outer_loss, (slow_state, fast_state, info)), grads = jax.value_and_grad(
             _batched_outer_loop, positions, has_aux=True
@@ -256,12 +257,12 @@ class MetaLearner:
             spt_classes,
         )
 
-        print("After grad")
+        # print("After grad")
 
         grads = jax.tree_map(lambda v: jax.lax.pmean(v, axis_name="i"), grads)
         opt_state = learner_state.opt_state
 
-        print("after pmean")
+        # print("after pmean")
         # Replace schedule state to global step to allow gradient accumulation
         #  print(global_step)
         # opt_state[-1] = jax.tree_map(
@@ -306,6 +307,7 @@ class MetaLearner:
                 updates,
             )
             inner_lr = learner_state.inner_lr
+        inner_lr = inner_lr.clip(a_min=0.001)
 
         out = (
             MetaLearnerState(
@@ -319,7 +321,7 @@ class MetaLearner:
             info,
         )
 
-        print("end of _update_fn")
+        # print("end of _update_fn")
 
         return out
 
@@ -422,7 +424,7 @@ class MetaLearner:
 
         if self._dataset == "miniimagenet":
             if self.train_cfg.method == "maml":
-                logging.info("Preparing MAML MiniImageNet")
+                print("Preparing MAML MiniImageNet")
                 rng_train, rng_val = split(rng)
                 dataset = MetaMiniImageNet(
                     rng_train,
@@ -434,7 +436,22 @@ class MetaLearner:
                     self.train_cfg.qry_shot,
                     #  self.train_cfg.method == "maml",
                 )
-                self._normalize_fn = dataset._normalize
+            elif self.train_cfg.method == "mrcl":
+                print("Preparing MRCL MiniImageNet")
+                rng_train, rng_val = split(rng)
+                dataset = MRCLMiniImageNet(
+                    self.train_cfg.cl_qry_shot,
+                    rng_train,
+                    "train",
+                    self._data_root,
+                    self.per_device_batch_size * jax.local_device_count(),
+                    self.train_cfg.way,
+                    self.train_cfg.shot,
+                    self.train_cfg.qry_shot,
+                    #  self.train_cfg.method == "maml",
+                )
+
+            self._normalize_fn = dataset._normalize
                 # self.val_dataset = MetaMiniImageNet(
                 #     rng_val,
                 #     "val",
@@ -598,3 +615,29 @@ class MetaMiniImageNet:
     def __next__(self):
         self._rng, rng = split(self._rng)
         return self.fsl_build(*self.fsl_sample(rng))
+
+class MRCLMiniImageNet(MetaMiniImageNet):
+    def __init__(self, cl_qry_shot, *args, **kwargs):
+        super().__init__(*args, **kwargs, shuffled_labels=False)
+
+        self.cl_qry_shot = cl_qry_shot
+        self.flat_images = flatten(self._images, (0, 1))
+        self.flat_labels = flatten(self._labels, (0, 1))
+
+    def __next__(self):
+        self._rng, rng_fsl, rng_cl = split(self._rng, 3)
+        x_spt, y_spt, x_qry, y_qry = self.fsl_build(*self.fsl_sample(rng_fsl))
+        cl_idxs = jax.random.choice(rng_cl, onp.arange(len(self.flat_images)), (self._batch_size * self.cl_qry_shot,), replace=False)
+        
+        # print(cl_idxs.shape, self.flat_images.shape)
+
+        x_qry_cl = self.flat_images[cl_idxs]
+        y_qry_cl = self.flat_labels[cl_idxs]
+        x_qry_cl = onp.reshape(x_qry_cl, (self._batch_size, self.cl_qry_shot, *x_qry_cl.shape[1:]))
+        y_qry_cl = onp.reshape(y_qry_cl, (self._batch_size, self.cl_qry_shot, *y_qry_cl.shape[1:]))
+        x_qry = onp.concatenate((x_spt, x_qry, x_qry_cl), 1)
+        y_qry = onp.concatenate((y_spt, y_qry, y_qry_cl), 1)
+        return x_spt, y_spt, x_qry, y_qry
+
+
+
