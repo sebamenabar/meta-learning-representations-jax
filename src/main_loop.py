@@ -154,7 +154,7 @@ def main(args, cfg):
     if cfg.worker_tpu_driver:
         jax.config.update("jax_xla_backend", "tpu_driver")
         jax.config.update("jax_backend_target", cfg.worker_tpu_driver)
-        print("Backend: %s %r", FLAGS.worker_tpu_driver, jax.devices())
+        print("Backend: %s %r", cfg.worker_tpu_driver, jax.devices())
 
     exp = Experiment(cfg, args)
     if not cfg.no_log:
@@ -322,12 +322,15 @@ def main(args, cfg):
             #     learner_state.slow_params, learner_state.slow_state
             # )
 
-            zero_fast_params = jax.tree_map(jnp.zeros_like, learner_state.fast_params)
+            if cfg.train.reset_head != "none":
+                fast_params = jax.tree_map(jnp.zeros_like, learner_state.fast_params)
+            else:
+                fast_params = learner_state.fast_params
             exp.log("Evaluation MAML No-Aug")
             maml_acc_no_aug, maml_std_no_aug = maml_tester_no_aug.eval(
                 learner_state.slow_params,
                 # learner_state.fast_params,
-                zero_fast_params,
+                fast_params,
                 learner_state.slow_state,
                 learner_state.fast_state,
                 learner_state.inner_lr,
@@ -338,7 +341,7 @@ def main(args, cfg):
             ) = maml_tester_no_aug_10_steps.eval(
                 learner_state.slow_params,
                 # learner_state.fast_params,
-                zero_fast_params,
+                fast_params,
                 learner_state.slow_state,
                 learner_state.fast_state,
                 learner_state.inner_lr,
@@ -349,7 +352,7 @@ def main(args, cfg):
             ) = maml_tester_no_aug_20_steps.eval(
                 learner_state.slow_params,
                 # learner_state.fast_params,
-                zero_fast_params,
+                fast_params,
                 learner_state.slow_state,
                 learner_state.fast_state,
                 learner_state.inner_lr,

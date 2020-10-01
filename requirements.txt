@@ -1,0 +1,7 @@
+dm-haiku==0.0.1
+dm-acme
+easydict
+omegaconf
+tensorboardX
+comet_ml
+optax

@@ -55,13 +55,13 @@ class BasicBlock(hk.Module):
 
         self.normalize = normalize
         if normalize == "bn":
-            print("Using batch normalization")
+            # print("Using batch normalization")
             norm = lambda name: hk.BatchNorm(**bn_config, name=name)
         elif normalize == "custom":
-            print("Using my batch normalization")
+            # print("Using my batch normalization")
             norm = lambda name: MyBatchNorm(**bn_config, name=name)
         elif normalize == "affine":
-            print("Using affine normalization")
+            # print("Using affine normalization")
             norm = lambda name: Affine(name=name)
 
         w_init = build_initializer(
