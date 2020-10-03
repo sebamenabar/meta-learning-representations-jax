@@ -400,6 +400,7 @@ def main(args, cfg):
                     maml_std_no_aug_20_steps=maml_std_no_aug_20_steps,
                     # maml_acc_aug=maml_acc_aug,
                     # maml_std_aug=maml_std_aug,
+                    ilr=meta_learner._learner_state.inner_lr[0],
                 ),
                 step=global_step,
                 prefix="val",
@@ -429,6 +430,21 @@ def main(args, cfg):
                 ilr=meta_learner._learner_state.inner_lr[0],
                 olr=meta_learner._scheduler(global_step),
                 refresh=False,
+            )
+            
+            exp.log_metrics(
+                dict(
+                    foa=outer_scalars["final"]["aux"][0]["acc"].item(),
+                    fol=outer_scalars["final"]["loss"].item(),
+                    ioa=outer_scalars["initial"]["aux"][0]["acc"].item(),
+                    iol=outer_scalars["initial"]["loss"].item(),
+                    iia=inner_scalars["auxs"][0]["acc"][0].item(),
+                    fia=inner_scalars["auxs"][0]["acc"][-1].item(),
+                    # ilr=meta_learner._learner_state.inner_lr[0],
+                    olr=meta_learner._scheduler(global_step),
+                ),
+                step=global_step,
+                prefix="train",
             )
 
 
