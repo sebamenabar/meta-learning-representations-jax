@@ -24,6 +24,8 @@ from tqdm.autonotebook import tqdm
 
 from mrcl_experiment import reshape_inputs
 
+def send_to_devices(tree):
+    return jax.pmap(lambda x: x)(tree_replicate(tree, jax.device_count()))
 
 # @jax.jit
 def normalize(x):
@@ -188,7 +190,8 @@ class MAMLTester:
         self.keep_orig_aug = keep_orig_aug
         self.reset_fn = reset_fn
 
-        self.batch_adapt_jit = jax.jit(
+        # self.batch_adapt_jit = jax.jit(
+        self.batch_adapt_jit = jax.pmap(
             jax.partial(
                 self._batch_adapt,
                 self.n_aug_samples,
@@ -208,32 +211,49 @@ class MAMLTester:
         if num_tasks is None:
             num_tasks = self.num_tasks
 
-        slow_state = jax.tree_map(
-            jax.partial(replicate_array, num_devices=self.batch_size), slow_state
+        per_device_batch_size = self.batch_size // jax.device_count()
+        assert (self.batch_size % jax.device_count()) == 0, f"Val batch size: {self.batch_size}, num devices {jax.device_count()}"
+        # slow_state = jax.tree_map(
+        #     jax.partial(replicate_array, num_devices=per_device_batch_size), slow_state
+        # )
+        # fast_state = jax.tree_map(
+        #     jax.partial(replicate_array, num_devices=per_device_batch_size), fast_state
+        # )
+        slow_state = tree_replicate(slow_state, per_device_batch_size)
+        fast_state = tree_replicate(fast_state, per_device_batch_size)
+
+        (slow_params, fast_params, slow_state, fast_state, inner_lr) = send_to_devices(
+            (slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            inner_lr,)
         )
-        fast_state = jax.tree_map(
-            jax.partial(replicate_array, num_devices=self.batch_size), fast_state
-        )
+
+        # slow_params = send_to_devices(slow_params)
+        # fast_params = send_to_devices(fast_params)
+        # slow_state = send_to_devices(slow_state)
+        # fast_state = send_to_devices(fast_state)
+        # inner_lr = send_to_devices(inner_lr)
 
         results = []
         rng, rng_data = split(jax.random.PRNGKey(0), 2)
         # self.dataset.rng = rng_data
         for i in tqdm(range(num_tasks // self.batch_size)):
             rng, rng_step = split(rng)
-            x_spt, y_spt, x_qry, y_qry = next(self.dataset)
-            spt_classes = onp.unique(y_spt, axis=1)
+            inputs = next(self.dataset)
+            spt_classes = onp.unique(inputs[1], axis=1)
+            inputs = reshape_inputs(inputs)
+            (spt_classes,) = reshape_inputs([spt_classes])
             results.append(
                 self.batch_adapt_jit(
-                    rng_step,
+                    split(rng_step, jax.device_count()),
                     slow_params,
                     fast_params,
                     slow_state,
                     fast_state,
                     inner_lr,
-                    x_spt,
-                    y_spt,
-                    x_qry,
-                    y_qry,
+                    *inputs,
                     spt_classes,
                 )
             )
@@ -453,10 +473,12 @@ class GPUMultinomialRegression:
         # self.dataset.rng = rng_data
         accs = []
         # targets = []
+        slow_params = jax.pmap(lambda x: x)(tree_replicate(slow_params, jax.device_count()))
+        slow_state = jax.pmap(lambda x: x)(tree_replicate(slow_state, jax.device_count()))
         predict_batch = lambda rng, *args: self.predict_batch(
             rng,
-            tree_replicate(slow_params, jax.device_count()),
-            tree_replicate(slow_state, jax.device_count()),
+            slow_params,
+            slow_state,
             *args,
         )
         for i in tqdm(range(num_tasks // self.batch_size)):

@@ -18,7 +18,7 @@ import haiku as hk
 
 from config import rsetattr
 from mrcl_experiment import MetaLearner, replicate_array, MetaMiniImageNet
-from eval_experiment import LRTester, MAMLTester
+from eval_experiment import GPUMultinomialRegression, MAMLTester
 from experiment import Experiment, Logger
 
 
@@ -29,7 +29,7 @@ def parse_args(parser=None):
 
     parser.add_argument("--train.num_outer_steps", type=int, default=30000)
     parser.add_argument(
-        "--train.batch_size", help="Number of FSL tasks", default=4, type=int
+        "--train.batch_size", help="Number of FSL tasks", default=8, type=int
     )
     parser.add_argument(
         "--train.sub_batch_size", help="Number of FSL tasks", default=None, type=int
@@ -44,7 +44,7 @@ def parse_args(parser=None):
         "--train.qry_shot",
         type=int,
         help="Number of quried samples per class",
-        default=10,
+        default=15,
     )
     parser.add_argument("--train.cl_qry_way", default=64, type=int)
     parser.add_argument("--train.cl_qry_shot", default=1, type=int)
@@ -55,8 +55,8 @@ def parse_args(parser=None):
 
     parser.add_argument("--train.prefetch", default=0, type=int)
     parser.add_argument("--train.weight_decay", default=0.0, type=float)
-    #  parser.add_argument("--train.apply_every", default=1, type=int)
-    parser.add_argument("--train.scheduler", choices=["none", "step", "cosine"])
+    # parser.add_argument("--train.apply_every", default=1, type=int)
+    parser.add_argument("--train.scheduler", default="none", choices=["none", "step", "cosine"])
 
     parser.add_argument(
         "--train.piecewise_constant_schedule",
@@ -71,8 +71,8 @@ def parse_args(parser=None):
     )
 
     parser.add_argument("--train.cosine_alpha", type=float, default=0.01)
-    parser.add_argument("--train.cosine_decay_steps", type=float, default=10000)
-    parser.add_argument("--train.cosine_transition_begin", type=float, default=5000)
+    parser.add_argument("--train.cosine_steps", type=float, default=10000)
+    parser.add_argument("--train.cosine_delay", type=float, default=5000)
 
     parser.add_argument(
         "--train.augment", default="none", choices=["none", "all", "spt", "qry"]
@@ -98,7 +98,7 @@ def parse_args(parser=None):
 
     # parser.add_argument("--val.pool", type=int, default=4)
     parser.add_argument(
-        "--val.batch_size", help="Number of FSL tasks", default=4, type=int
+        "--val.batch_size", help="Number of FSL tasks", default=32, type=int
     )
     # parser.add_argument(
     #     "--val.fsl.qry_shot",
@@ -106,14 +106,14 @@ def parse_args(parser=None):
     #     help="Number of quried samples per class",
     #     default=15,
     # )
-    parser.add_argument("--val.num_inner_steps", type=int, default=5)
-    parser.add_argument("--val.num_tasks", type=int, default=500)
+    parser.add_argument("--val.num_inner_steps", type=int, default=10)
+    parser.add_argument("--val.num_tasks", type=int, default=600)
 
     parser.add_argument(
         "--model.model_name", default="convnet4", choices=["resnet12", "convnet4"]
     )
-    parser.add_argument("--model.output_size", type=int)
-    parser.add_argument("--model.hidden_size", default=0, type=int)
+    parser.add_argument("--model.output_size", type=int, required=True)
+    parser.add_argument("--model.hidden_size", default=64, type=int)
     parser.add_argument("--model.activation", default="relu", type=str)
     parser.add_argument(
         "--model.initializer",
@@ -148,6 +148,126 @@ def parse_args(parser=None):
         rsetattr(cfg, argname, argval)
 
     return args, cfg
+
+
+class Evaluator:
+    def __init__(self, data_dir, val_cfg, slow_apply, fast_apply):
+        self.slow_apply = slow_apply
+        self.fast_apply = fast_apply
+        self.val_dataset1 = MetaMiniImageNet(
+            jax.random.PRNGKey(0),
+            "val",
+            data_dir,
+            val_cfg.batch_size,
+            way=5,
+            shot=5,
+            qry_shot=15,
+        )
+        # For validation with augmented samples we need
+        # another dataset with reduced batch_size
+        self.val_dataset2 = MetaMiniImageNet(
+            jax.random.PRNGKey(0),
+            "val",
+            data_dir,
+            max(val_cfg.batch_size // 4, 1),
+            way=5,
+            shot=5,
+            qry_shot=15,
+        )
+        self.lr_no_aug_tester = GPUMultinomialRegression(
+            5,
+            slow_apply,
+            val_cfg.num_tasks,
+            self.val_dataset1,
+            0,
+            self.val_dataset1._normalize,
+        )
+        self.lr_aug_tester = GPUMultinomialRegression(
+            5,
+            slow_apply,
+            val_cfg.num_tasks,
+            self.val_dataset2,
+            5,
+            self.val_dataset2._normalize,
+            keep_orig_aug=False,
+        )
+        # self.maml_tester_no_aug = MAMLTester(
+        #     slow_apply,
+        #     fast_apply,
+        #     val_cfg.num_tasks,
+        #     # cfg.val.batch_size,
+        #     self.val_dataset,
+        #     # val_cfg.num_inner_steps,
+        #     5,
+        #     0,
+        #     self.val_dataset1._normalize,
+        # )
+        self.maml_tester_no_aug_10_steps = MAMLTester(
+            slow_apply,
+            fast_apply,
+            val_cfg.num_tasks,
+            # cfg.val.batch_size,
+            self.val_dataset1,
+            # cfg.val.num_inner_steps,
+            10,
+            0,
+            self.val_dataset1._normalize,
+        )
+        self.maml_tester_aug_10_steps = MAMLTester(
+            slow_apply,
+            fast_apply,
+            val_cfg.num_tasks,
+            # cfg.val.batch_size,
+            self.val_dataset2,
+            # cfg.val.num_inner_steps,
+            10,
+            5,
+            self.val_dataset2._normalize,
+            keep_orig_aug=False,
+        )
+
+    def eval(self, exp, slow_params, fast_params, slow_state, fast_state, inner_lr, reset_head):
+        if reset_head != "none":
+            fast_params = jax.tree_map(jnp.zeros_like, fast_params)
+        exp.log()
+        exp.log("Evaluating LR No-Aug")
+        lr_no_aug_acc, lr_no_aug_std = self.lr_no_aug_tester.eval(
+            slow_params, slow_state,
+        )
+        exp.log("Evaluating LR Aug")
+        lr_aug_acc, lr_aug_std = self.lr_aug_tester.eval(
+            slow_params, slow_state,
+        )
+        exp.log("Evaluating MAML No-Aug")
+        maml_acc_no_aug, maml_std_no_aug = self.maml_tester_no_aug_10_steps.eval(
+                slow_params,
+                fast_params,
+                slow_state,
+                fast_state,
+                inner_lr,
+            )
+        exp.log("Evaluating MAML Aug")
+        maml_acc_aug, maml_std_aug = self.maml_tester_aug_10_steps.eval(
+                slow_params,
+                fast_params,
+                slow_state,
+                fast_state,
+                inner_lr,
+            )
+
+        return edict(
+            lr_no_aug_acc=lr_no_aug_acc,
+            lr_no_aug_std=lr_no_aug_std,
+            lr_aug_acc=lr_aug_acc,
+            lr_aug_std=lr_aug_std,
+            maml_acc_no_aug=maml_acc_no_aug,
+            maml_std_no_aug=maml_std_no_aug,
+            maml_acc_aug=maml_acc_aug,
+            maml_std_aug=maml_std_aug,
+        )
+
+        # exp.log("Evaluating MAML Aug")
+
 
 
 def main(args, cfg):
@@ -190,41 +310,48 @@ def main(args, cfg):
         cfg.val,
     )
 
-    val_dataset = MetaMiniImageNet(
-        jax.random.PRNGKey(0),
-        "val",
+    evaluator = Evaluator(
         cfg.data_dir,
-        cfg.val.batch_size,
-        5,
-        5,
-        15,
-        # cfg.train.way,
-        # cfg.train.shot,
-        # cfg.train.qry_shot,
-    )
-    val_dataset2 = MetaMiniImageNet(
-        jax.random.PRNGKey(0),
-        "val",
-        cfg.data_dir,
-        # cfg.val.batch_size,
-        5,  # For augmented testing
-        5,
-        5,
-        15,
-        # cfg.train.way,
-        # cfg.train.shot,
-        # cfg.train.qry_shot,
+        cfg.val,
+        meta_learner._encoder.apply,
+        meta_learner._classifier.apply,
     )
 
-    lr_tester_no_aug = LRTester(
-        meta_learner._encoder.apply,
-        cfg.val.num_tasks,
-        # cfg.val.batch_size,
-        # 1,
-        val_dataset,
-        0,
-        val_dataset._normalize,
-    )
+    # val_dataset = MetaMiniImageNet(
+    #     jax.random.PRNGKey(0),
+    #     "val",
+    #     cfg.data_dir,
+    #     cfg.val.batch_size,
+    #     5,
+    #     5,
+    #     15,
+    #     # cfg.train.way,
+    #     # cfg.train.shot,
+    #     # cfg.train.qry_shot,
+    # )
+    # val_dataset2 = MetaMiniImageNet(
+    #     jax.random.PRNGKey(0),
+    #     "val",
+    #     cfg.data_dir,
+    #     # cfg.val.batch_size,
+    #     5,  # For augmented testing
+    #     5,
+    #     5,
+    #     15,
+    #     # cfg.train.way,
+    #     # cfg.train.shot,
+    #     # cfg.train.qry_shot,
+    # )
+
+    # lr_tester_no_aug = LRTester(
+    #     meta_learner._encoder.apply,
+    #     cfg.val.num_tasks,
+    #     # cfg.val.batch_size,
+    #     # 1,
+    #     val_dataset,
+    #     0,
+    #     val_dataset._normalize,
+    # )
     # lr_tester_aug = LRTester(
     #     meta_learner._encoder.apply,
     #     cfg.val.num_tasks,
@@ -234,38 +361,38 @@ def main(args, cfg):
     #     val_dataset2._normalize,
     #     keep_orig_aug=False,
     # )
-    maml_tester_no_aug = MAMLTester(
-        meta_learner._encoder.apply,
-        meta_learner._classifier.apply,
-        cfg.val.num_tasks,
-        #  cfg.val.batch_size,
-        val_dataset,
-        cfg.val.num_inner_steps,
-        0,
-        val_dataset._normalize,
-    )
-    maml_tester_no_aug_10_steps = MAMLTester(
-        meta_learner._encoder.apply,
-        meta_learner._classifier.apply,
-        cfg.val.num_tasks,
-        #  cfg.val.batch_size,
-        val_dataset,
-        # cfg.val.num_inner_steps,
-        10,
-        0,
-        val_dataset._normalize,
-    )
-    maml_tester_no_aug_20_steps = MAMLTester(
-        meta_learner._encoder.apply,
-        meta_learner._classifier.apply,
-        cfg.val.num_tasks,
-        #  cfg.val.batch_size,
-        val_dataset,
-        # cfg.val.num_inner_steps,
-        20,
-        0,
-        val_dataset._normalize,
-    )
+    # maml_tester_no_aug = MAMLTester(
+    #     meta_learner._encoder.apply,
+    #     meta_learner._classifier.apply,
+    #     cfg.val.num_tasks,
+    #     #  cfg.val.batch_size,
+    #     val_dataset,
+    #     cfg.val.num_inner_steps,
+    #     0,
+    #     val_dataset._normalize,
+    # )
+    # maml_tester_no_aug_10_steps = MAMLTester(
+    #     meta_learner._encoder.apply,
+    #     meta_learner._classifier.apply,
+    #     cfg.val.num_tasks,
+    #     #  cfg.val.batch_size,
+    #     val_dataset,
+    #     # cfg.val.num_inner_steps,
+    #     10,
+    #     0,
+    #     val_dataset._normalize,
+    # )
+    # maml_tester_no_aug_20_steps = MAMLTester(
+    #     meta_learner._encoder.apply,
+    #     meta_learner._classifier.apply,
+    #     cfg.val.num_tasks,
+    #     #  cfg.val.batch_size,
+    #     val_dataset,
+    #     # cfg.val.num_inner_steps,
+    #     20,
+    #     0,
+    #     val_dataset._normalize,
+    # )
     # maml_tester_aug = MAMLTester(
     #     meta_learner._encoder.apply,
     #     meta_learner._classifier.apply,
@@ -312,51 +439,51 @@ def main(args, cfg):
         ):
             learner_state = meta_learner.get_first_state()
 
-            exp.log()
-            exp.log("Evaluation Logistic Regression No-Aug")
-            lr_no_aug_acc, lr_no_aug_std = lr_tester_no_aug.eval(
-                learner_state.slow_params, learner_state.slow_state
-            )
+            # exp.log()
+            # exp.log("Evaluation Logistic Regression No-Aug")
+            # lr_no_aug_acc, lr_no_aug_std = lr_tester_no_aug.eval(
+            #     learner_state.slow_params, learner_state.slow_state
+            # )
             # exp.log("Evaluation Logistic Regression Aug")
             # lr_aug_acc, lr_aug_std = lr_tester_aug.eval(
             #     learner_state.slow_params, learner_state.slow_state
             # )
 
-            if cfg.train.reset_head != "none":
-                fast_params = jax.tree_map(jnp.zeros_like, learner_state.fast_params)
-            else:
-                fast_params = learner_state.fast_params
-            exp.log("Evaluation MAML No-Aug")
-            maml_acc_no_aug, maml_std_no_aug = maml_tester_no_aug.eval(
-                learner_state.slow_params,
-                # learner_state.fast_params,
-                fast_params,
-                learner_state.slow_state,
-                learner_state.fast_state,
-                learner_state.inner_lr,
-            )
-            (
-                maml_acc_no_aug_10_steps,
-                maml_std_no_aug_10_steps,
-            ) = maml_tester_no_aug_10_steps.eval(
-                learner_state.slow_params,
-                # learner_state.fast_params,
-                fast_params,
-                learner_state.slow_state,
-                learner_state.fast_state,
-                learner_state.inner_lr,
-            )
-            (
-                maml_acc_no_aug_20_steps,
-                maml_std_no_aug_20_steps,
-            ) = maml_tester_no_aug_20_steps.eval(
-                learner_state.slow_params,
-                # learner_state.fast_params,
-                fast_params,
-                learner_state.slow_state,
-                learner_state.fast_state,
-                learner_state.inner_lr,
-            )
+            # if cfg.train.reset_head != "none":
+            #     fast_params = jax.tree_map(jnp.zeros_like, learner_state.fast_params)
+            # else:
+            #     fast_params = learner_state.fast_params
+            # exp.log("Evaluation MAML No-Aug")
+            # maml_acc_no_aug, maml_std_no_aug = maml_tester_no_aug.eval(
+            #     learner_state.slow_params,
+            #     # learner_state.fast_params,
+            #     fast_params,
+            #     learner_state.slow_state,
+            #     learner_state.fast_state,
+            #     learner_state.inner_lr,
+            # )
+            # (
+            #     maml_acc_no_aug_10_steps,
+            #     maml_std_no_aug_10_steps,
+            # ) = maml_tester_no_aug_10_steps.eval(
+            #     learner_state.slow_params,
+            #     # learner_state.fast_params,
+            #     fast_params,
+            #     learner_state.slow_state,
+            #     learner_state.fast_state,
+            #     learner_state.inner_lr,
+            # )
+            # (
+            #     maml_acc_no_aug_20_steps,
+            #     maml_std_no_aug_20_steps,
+            # ) = maml_tester_no_aug_20_steps.eval(
+            #     learner_state.slow_params,
+            #     # learner_state.fast_params,
+            #     fast_params,
+            #     learner_state.slow_state,
+            #     learner_state.fast_state,
+            #     learner_state.inner_lr,
+            # )
             # exp.log("Evaluation MAML Aug")
             # maml_acc_aug, maml_std_aug = maml_tester_aug.eval(
             #     learner_state.slow_params,
@@ -372,35 +499,49 @@ def main(args, cfg):
             #     learner_state.inner_lr,
             # )
 
+            val_metrics = evaluator.eval(
+                exp,
+                learner_state.slow_params,
+                learner_state.fast_params,
+                learner_state.slow_state,
+                learner_state.fast_state,
+                learner_state.inner_lr,
+                cfg.train.reset_head,
+            )
+
             exp.log(f"\nStep {global_step + 1} statistics:")
+            # exp.log(
+            #     f"MAML {cfg.val.num_inner_steps}-steps No-Aug Acc: {maml_acc_no_aug}±{maml_std_no_aug}"
+            # )
             exp.log(
-                f"MAML {cfg.val.num_inner_steps}-steps No-Aug Acc: {maml_acc_no_aug}±{maml_std_no_aug}"
+                f"MAML 10-steps No-Aug Acc: {val_metrics.maml_acc_no_aug}±{val_metrics.maml_std_no_aug}"
             )
             exp.log(
-                f"MAML 10-steps No-Aug Acc: {maml_acc_no_aug_10_steps}±{maml_std_no_aug_10_steps}"
+                f"MAML 10-steps Aug Acc: {val_metrics.maml_acc_aug}±{val_metrics.maml_std_aug}"
             )
-            exp.log(
-                f"MAML 20-steps No-Aug Acc: {maml_acc_no_aug_10_steps}±{maml_std_no_aug_10_steps}"
-            )
+            # exp.log(
+            #     f"MAML 20-steps No-Aug Acc: {maml_acc_no_aug_10_steps}±{maml_std_no_aug_10_steps}"
+            # )
             # exp.log(f"MAML Aug Acc: {maml_acc_aug}±{maml_std_aug}")
-            exp.log(f"Logistic Regression No-Aug Acc: {lr_no_aug_acc}±{lr_no_aug_std}")
-            # exp.log(f"Logistic Regression Aug Acc: {lr_aug_acc}±{lr_aug_std}")
+            exp.log(f"Logistic Regression No-Aug Acc: {val_metrics.lr_no_aug_acc}±{val_metrics.lr_no_aug_std}")
+            exp.log(f"Logistic Regression Aug Acc: {val_metrics.lr_aug_acc}±{val_metrics.lr_aug_std}")
 
             exp.log_metrics(
                 dict(
-                    lr_no_aug_acc=lr_no_aug_acc,
-                    lr_no_aug_std=lr_no_aug_std,
-                    # lr_aug_acc=lr_aug_acc,
-                    # lr_aug_std=lr_aug_std,
-                    maml_acc_no_aug=maml_acc_no_aug,
-                    maml_std_no_aug=maml_std_no_aug,
-                    maml_acc_no_aug_10_steps=maml_acc_no_aug_10_steps,
-                    maml_std_no_aug_10_steps=maml_std_no_aug_10_steps,
-                    maml_acc_no_aug_20_steps=maml_acc_no_aug_20_steps,
-                    maml_std_no_aug_20_steps=maml_std_no_aug_20_steps,
+                    # lr_no_aug_acc=lr_no_aug_acc,
+                    # lr_no_aug_std=lr_no_aug_std,
+                    # # lr_aug_acc=lr_aug_acc,
+                    # # lr_aug_std=lr_aug_std,
+                    # maml_acc_no_aug=maml_acc_no_aug,
+                    # maml_std_no_aug=maml_std_no_aug,
+                    # maml_acc_no_aug_10_steps=maml_acc_no_aug_10_steps,
+                    # maml_std_no_aug_10_steps=maml_std_no_aug_10_steps,
+                    # maml_acc_no_aug_20_steps=maml_acc_no_aug_20_steps,
+                    # maml_std_no_aug_20_steps=maml_std_no_aug_20_steps,
                     # maml_acc_aug=maml_acc_aug,
                     # maml_std_aug=maml_std_aug,
                     ilr=meta_learner._learner_state.inner_lr[0],
+                    **val_metrics,
                 ),
                 step=global_step,
                 prefix="val",
