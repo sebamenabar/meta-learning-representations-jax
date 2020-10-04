@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 from jax.random import split
 
+from tensorflow_probability.substrates import jax as tfp
+
 import optax as ox
 
 import time
@@ -19,6 +21,8 @@ from lib import (
 from test_utils import lr_fit_eval
 
 from tqdm.autonotebook import tqdm
+
+from mrcl_experiment import reshape_inputs
 
 
 # @jax.jit
@@ -341,3 +345,200 @@ class MAMLTester:
         )
 
         return info
+
+
+def tree_replicate(tree, num):
+    return jax.tree_map(lambda x: replicate_array(x, num), tree)
+
+
+def xe_loss(logits, targets):
+    return -jnp.take_along_axis(jax.nn.log_softmax(logits), targets[..., None], axis=-1)
+
+
+def regression_batchwise_loss(W, num_classes, c, features, targets):
+    batch_size = features.shape[0]
+    num_features = features.shape[-1]
+    b = W[:, :num_classes].reshape(batch_size, 1, num_classes)
+    # b = W[:num_classes * batch_size].reshape(batch_size, 1, num_classes)
+    w = W[:, num_classes:].reshape(batch_size, num_features, num_classes)
+    # w = W[num_classes * batch_size:].reshape(batch_size, num_features, num_classes)
+    logits = jnp.matmul(features, w) + b
+    loss = c * xe_loss(logits, targets).sum((1, 2)) + (1 / 2) * (w ** 2).sum((1, 2))
+    return loss.sum(), loss
+
+
+def regression_value_and_grad_fn(num_classes, c, features, targets, W):
+    grad, loss = jax.grad(regression_batchwise_loss, has_aux=True)(
+        W, num_classes, c, features, targets
+    )
+    return loss, grad
+
+
+def lr_fit_jax(features, y, num_classes):
+    batch_size = features.shape[0]
+    num_features = features.shape[-1]
+    W_size = (batch_size, (num_features + 1) * num_classes)
+    W = jnp.zeros(W_size, dtype=features.dtype)
+    c = 10.0
+
+
+    minimized = tfp.optimizer.lbfgs_minimize(
+        value_and_gradients_function=jax.partial(
+            regression_value_and_grad_fn, num_classes, c, features, y
+        ),
+        initial_position=W,
+        previous_optimizer_results=None,
+        num_correction_pairs=10,
+        # tolerance=1e-08,
+        tolerance=1e-8,
+        x_tolerance=0,
+        f_relative_tolerance=0,
+        initial_inverse_hessian_estimate=None,
+        max_iterations=1000,
+        parallel_iterations=1,
+        stopping_condition=None,
+        max_line_search_iterations=50,
+        name=None,
+    )
+
+    b = minimized.position[:, :num_classes].reshape(batch_size, 1, num_classes)
+    w = minimized.position[:, num_classes:].reshape(
+        batch_size, num_features, num_classes
+    )
+    return w, b
+
+
+class GPUMultinomialRegression:
+    def __init__(
+        self,
+        num_classes,
+        slow_apply,
+        num_tasks,
+        #  batch_size,
+        dataset,
+        n_aug_samples,
+        normalize_fn,
+        keep_orig_aug=True,
+        final_normalize=True,
+    ):
+        self.dataset = dataset
+        self.num_classes = num_classes
+
+        self.slow_apply = slow_apply
+        self.num_tasks = num_tasks
+        self.batch_size = dataset._batch_size
+        self.num_tasks
+        self.dataset = dataset
+        self.n_aug_samples = n_aug_samples
+        self.normalize_fn = normalize_fn
+        self.keep_orig_aug = keep_orig_aug
+        self.final_normalize = final_normalize
+
+        self.predict_batch = jax.pmap(
+            jax.partial(
+                self._predict_batch,
+                num_classes,
+                n_aug_samples,
+                normalize_fn,
+                slow_apply,
+                keep_orig_aug,
+                final_normalize,
+            )
+        )
+
+    def eval(self, slow_params, slow_state, num_tasks=None):
+        if num_tasks is None:
+            num_tasks = self.num_tasks
+        rng, rng_data = split(jax.random.PRNGKey(0), 2)
+        # self.dataset.rng = rng_data
+        accs = []
+        # targets = []
+        predict_batch = lambda rng, *args: self.predict_batch(
+            rng,
+            tree_replicate(slow_params, jax.device_count()),
+            tree_replicate(slow_state, jax.device_count()),
+            *args,
+        )
+        for i in tqdm(range(num_tasks // self.batch_size)):
+            rng, rng_step = split(rng)
+            x_spt, y_spt, x_qry, y_qry = reshape_inputs(next(self.dataset))
+
+            now = time.time()
+            taskwise_acc = predict_batch(
+                split(rng_step, jax.device_count()),
+                # slow_params,
+                # slow_state,
+                x_spt,
+                y_spt,
+                x_qry,
+                y_qry,
+            )
+            accs.append(taskwise_acc)
+
+            # print("forward time:", time.time() - now)
+            now = time.time()
+        accs = jnp.concatenate(accs)
+
+        return accs.mean(), accs.std()
+
+    @staticmethod
+    def _predict_batch(
+        num_classes,
+        n_aug_samples,
+        normalize_fn,
+        slow_apply,
+        keep_orig_aug,
+        final_normalize,
+        rng,
+        slow_params,
+        slow_state,
+        x_spt,
+        y_spt,
+        x_qry,
+        y_qry,
+    ):
+        # print(x_spt.shape)
+        x_spt, x_qry = x_spt / 255, x_qry / 255
+        # if self.n_aug_samples:
+        print(
+            f"Evaluating LR {n_aug_samples} augmented samples keep orig {keep_orig_aug}"
+        )
+        if n_aug_samples:
+            # print("Augmenting testing samples")
+            # aug_x_spt = x_spt.repeat(self.n_aug_samples, 1)
+            aug_x_spt = x_spt.repeat(n_aug_samples, 1)
+            # aug_y_spt = y_spt.repeat(self.n_aug_samples, 1)
+            aug_y_spt = y_spt.repeat(n_aug_samples, 1)
+            rng, rng_aug = split(rng)
+            aug_x_spt = augment(rng_aug, flatten(aug_x_spt, (0, 1))).reshape(
+                *aug_x_spt.shape
+            )
+
+            if keep_orig_aug:
+                x_spt = jnp.concatenate((x_spt, aug_x_spt), axis=1)
+                y_spt = jnp.concatenate((y_spt, aug_y_spt), axis=1)
+            else:
+                x_spt = aug_x_spt
+                y_spt = aug_y_spt
+
+        x_spt = normalize_fn(x_spt)
+        x_qry = normalize_fn(x_qry)
+
+        spt_features = jax.vmap(
+            jax.partial(slow_apply, slow_params, slow_state, None, is_training=False)
+        )(x_spt)[0][0]
+        qry_features = jax.vmap(
+            jax.partial(slow_apply, slow_params, slow_state, None, is_training=False)
+        )(x_qry)[0][0]
+
+        if final_normalize:
+            spt_features = normalize(spt_features)
+            qry_features = normalize(qry_features)
+
+        w, b = lr_fit_jax(spt_features, y_spt, num_classes)
+        qry_logits = jnp.matmul(qry_features, w) + b
+        taskwise_acc = (
+            (jax.nn.softmax(qry_logits).argmax(-1) == y_qry).astype(jnp.float32).mean(1)
+        )
+
+        return taskwise_acc

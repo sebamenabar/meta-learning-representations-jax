@@ -5,3 +5,4 @@ omegaconf
 tensorboardX
 comet_ml
 optax
+tfp-nightly[jax]
