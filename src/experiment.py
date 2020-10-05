@@ -209,7 +209,8 @@ class Experiment:
         #  atexit.register(self.logfile.close)
 
         shutil.copytree(
-            osp.join(self.work_dir, "src"),
+            # osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "src"),
+            osp.dirname(osp.realpath(__file__)),
             osp.join(self.exp_dir, "src"),
             ignore=shutil.ignore_patterns(".*", "__pycache__", ".DS_Store"),
         )

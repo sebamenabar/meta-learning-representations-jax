@@ -19,6 +19,7 @@ import haiku as hk
 from config import rsetattr
 from mrcl_experiment import MetaLearner, replicate_array, MetaMiniImageNet
 from eval_experiment import GPUMultinomialRegression, MAMLTester
+from test_utils import SupervisedStandardTester
 from experiment import Experiment, Logger
 
 
@@ -420,7 +421,7 @@ def main(args, cfg):
                         dill.dump(
                             {
                                 **val_metrics,
-                                **learner_state,
+                                **learner_state._asdict(),
                                 "rng": rng,
                                 "counter": counter,
                             },
