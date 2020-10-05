@@ -56,7 +56,9 @@ def parse_args(parser=None):
     parser.add_argument("--train.prefetch", default=0, type=int)
     parser.add_argument("--train.weight_decay", default=0.0, type=float)
     # parser.add_argument("--train.apply_every", default=1, type=int)
-    parser.add_argument("--train.scheduler", default="none", choices=["none", "step", "cosine"])
+    parser.add_argument(
+        "--train.scheduler", default="none", choices=["none", "step", "cosine"]
+    )
 
     parser.add_argument(
         "--train.piecewise_constant_schedule",
@@ -141,6 +143,9 @@ def parse_args(parser=None):
     )
 
     parser.add_argument("--fake_pmap_jit", action="store_true", default=False)
+    parser.add_argument(
+        "--no_eval_aug", action="store_false", default=True, dest="eval_aug"
+    )
 
     args = parser.parse_args()
     cfg = edict(train=edict(cl=edict()), val=edict(fsl=edict()), model=edict())
@@ -226,28 +231,48 @@ class Evaluator:
             keep_orig_aug=False,
         )
 
-    def eval(self, exp, slow_params, fast_params, slow_state, fast_state, inner_lr, reset_head):
+    def eval(
+        self,
+        exp,
+        slow_params,
+        fast_params,
+        slow_state,
+        fast_state,
+        inner_lr,
+        reset_head,
+        eval_aug,
+    ):
         if reset_head != "none":
             fast_params = jax.tree_map(jnp.zeros_like, fast_params)
         exp.log()
         exp.log("Evaluating LR No-Aug")
-        lr_no_aug_acc, lr_no_aug_std = self.lr_no_aug_tester.eval(
-            slow_params, slow_state,
+
+        out = edict()
+
+        out.lr_no_aug_acc, out.lr_no_aug_std = self.lr_no_aug_tester.eval(
+            slow_params,
+            slow_state,
         )
-        exp.log("Evaluating LR Aug")
-        lr_aug_acc, lr_aug_std = self.lr_aug_tester.eval(
-            slow_params, slow_state,
-        )
-        exp.log("Evaluating MAML No-Aug")
-        maml_acc_no_aug, maml_std_no_aug = self.maml_tester_no_aug_10_steps.eval(
+        if eval_aug:
+            exp.log("Evaluating LR Aug")
+            out.lr_aug_acc, out.lr_aug_std = self.lr_aug_tester.eval(
                 slow_params,
-                fast_params,
                 slow_state,
-                fast_state,
-                inner_lr,
             )
-        exp.log("Evaluating MAML Aug")
-        maml_acc_aug, maml_std_aug = self.maml_tester_aug_10_steps.eval(
+        exp.log("Evaluating MAML No-Aug")
+        (
+            out.maml_acc_no_aug,
+            out.maml_std_no_aug,
+        ) = self.maml_tester_no_aug_10_steps.eval(
+            slow_params,
+            fast_params,
+            slow_state,
+            fast_state,
+            inner_lr,
+        )
+        if eval_aug:
+            exp.log("Evaluating MAML Aug")
+            out.maml_acc_aug, out.maml_std_aug = self.maml_tester_aug_10_steps.eval(
                 slow_params,
                 fast_params,
                 slow_state,
@@ -255,19 +280,9 @@ class Evaluator:
                 inner_lr,
             )
 
-        return edict(
-            lr_no_aug_acc=lr_no_aug_acc,
-            lr_no_aug_std=lr_no_aug_std,
-            lr_aug_acc=lr_aug_acc,
-            lr_aug_std=lr_aug_std,
-            maml_acc_no_aug=maml_acc_no_aug,
-            maml_std_no_aug=maml_std_no_aug,
-            maml_acc_aug=maml_acc_aug,
-            maml_std_aug=maml_std_aug,
-        )
+        return out
 
         # exp.log("Evaluating MAML Aug")
-
 
 
 def main(args, cfg):
@@ -356,6 +371,7 @@ def main(args, cfg):
                 learner_state.fast_state,
                 learner_state.inner_lr,
                 cfg.train.reset_head,
+                cfg.eval_aug,
             )
 
             exp.log(f"\nStep {global_step + 1} statistics:")
@@ -365,15 +381,21 @@ def main(args, cfg):
             exp.log(
                 f"MAML 10-steps No-Aug Acc: {val_metrics.maml_acc_no_aug}±{val_metrics.maml_std_no_aug}"
             )
-            exp.log(
-                f"MAML 10-steps Aug Acc: {val_metrics.maml_acc_aug}±{val_metrics.maml_std_aug}"
-            )
             # exp.log(
             #     f"MAML 20-steps No-Aug Acc: {maml_acc_no_aug_10_steps}±{maml_std_no_aug_10_steps}"
             # )
             # exp.log(f"MAML Aug Acc: {maml_acc_aug}±{maml_std_aug}")
-            exp.log(f"Logistic Regression No-Aug Acc: {val_metrics.lr_no_aug_acc}±{val_metrics.lr_no_aug_std}")
-            exp.log(f"Logistic Regression Aug Acc: {val_metrics.lr_aug_acc}±{val_metrics.lr_aug_std}")
+            exp.log(
+                f"Logistic Regression No-Aug Acc: {val_metrics.lr_no_aug_acc}±{val_metrics.lr_no_aug_std}"
+            )
+
+            if cfg.eval_aug:
+                exp.log(
+                    f"Logistic Regression Aug Acc: {val_metrics.lr_aug_acc}±{val_metrics.lr_aug_std}"
+                )
+                exp.log(
+                    f"MAML 10-steps Aug Acc: {val_metrics.maml_acc_aug}±{val_metrics.maml_std_aug}"
+                )
 
             exp.log_metrics(
                 dict(
@@ -385,16 +407,16 @@ def main(args, cfg):
             )
             exp.log()
 
-            if val_metrics.lr_aug_acc > best_val_acc:
-                best_val_acc = val_metrics.lr_aug_acc
-                # outer_opt_state = jax.tree_map(lambda xs: xs[0, 0], rep_outer_opt_state)
+            if val_metrics.lr_no_aug_acc > best_val_acc:
+                best_val_acc = val_metrics.lr_no_aug_acc
+                #  outer_opt_state = jax.tree_map(lambda xs: xs[0, 0], rep_outer_opt_state)
                 # best_val_acc = fsl_maml_acc_5
-                exp.log(
-                    f"\  New best 5-way-5-shot validation accuracy: {best_val_acc}"
-                )
+                exp.log(f"\  New best 5-way-5-shot validation accuracy: {best_val_acc}")
                 if not cfg.no_log:
                     exp.log("Saving checkpoint\n")
-                    with open(osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb") as f:
+                    with open(
+                        osp.join(exp.exp_dir, "checkpoints/best.ckpt"), "wb"
+                    ) as f:
                         dill.dump(
                             {
                                 **val_metrics,
@@ -430,7 +452,7 @@ def main(args, cfg):
                 olr=meta_learner._scheduler(global_step),
                 refresh=False,
             )
-            
+
             exp.log_metrics(
                 dict(
                     foa=outer_scalars["final"]["aux"][0]["acc"].item(),
@@ -439,7 +461,7 @@ def main(args, cfg):
                     iol=outer_scalars["initial"]["loss"].item(),
                     iia=inner_scalars["auxs"][0]["acc"][0].item(),
                     fia=inner_scalars["auxs"][0]["acc"][-1].item(),
-                    # ilr=meta_learner._learner_state.inner_lr[0],
+                    #  ilr=meta_learner._learner_state.inner_lr[0],
                     olr=meta_learner._scheduler(global_step),
                 ),
                 step=global_step,
