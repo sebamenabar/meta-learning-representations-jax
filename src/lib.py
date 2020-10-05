@@ -616,7 +616,7 @@ def delayed_cosine_decay_schedule(
         raise ValueError("The cosine_decay_schedule requires positive decay_steps!")
 
     def schedule(count):
-        count = jnp.minimum(count - transition_begin, decay_steps)
+        count = jnp.minimum(count - transition_begin, decay_steps) + 1
         cosine_decay = 0.5 * (1 + jnp.cos(jnp.pi * count / decay_steps))
         decayed = (1 - alpha) * cosine_decay + alpha
         return jnp.where(count < 0, init_value, init_value * decayed)

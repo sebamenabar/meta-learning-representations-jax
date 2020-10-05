@@ -398,7 +398,7 @@ def main(args, cfg):
                         dill.dump(
                             {
                                 **val_metrics,
-                                **learner_state,
+                                **learner_state._asdict(),
                                 "rng": rng,
                                 "counter": counter,
                             },
