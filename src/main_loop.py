@@ -19,6 +19,7 @@ import haiku as hk
 from config import rsetattr
 from mrcl_experiment import MetaLearner, replicate_array, MetaMiniImageNet
 from eval_experiment import GPUMultinomialRegression, MAMLTester
+from test_utils import SupervisedStandardTester
 from experiment import Experiment, Logger
 
 

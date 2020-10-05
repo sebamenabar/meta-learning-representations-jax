@@ -9,7 +9,7 @@ from tensorflow_probability.substrates import jax as tfp
 import optax as ox
 
 import time
-from data import augment
+from data import augment, BatchSampler
 from lib import (
     flatten,
     fsl_inner_loop,
@@ -565,3 +565,51 @@ class GPUMultinomialRegression:
         )
 
         return taskwise_acc
+
+
+class ParallelSupervisedStandardTester:
+    def __init__(
+        self, rng, dataset, batch_size, slow_apply, fast_apply, normalize_fn=None,
+    ):
+        self.rng = rng
+        self.x = flatten(dataset._images, (0, 1))
+        self.y = flatten(dataset._labels, (0, 1))
+        self.batch_size = batch_size
+        self.normalize_fn = normalize_fn
+        self.eval_batch = jax.pmap(jax.partial(
+            self._eval_batch, normalize_fn, slow_apply, fast_apply,
+            ), axis_name="i")
+
+    def eval(self, slow_params, fast_params, slow_state, fast_state):
+        rng = jax.random.PRNGKey(0)
+        sampler = BatchSampler(rng, self.x, self.y, self.batch_size, shuffle=True, keep_last=True)
+    
+        (slow_params, fast_params, slow_state, fast_state) = send_to_devices(
+            (slow_params,
+            fast_params,
+            slow_state,
+            fast_state,)
+        )
+
+        total_corrects = 0
+        total_samples = 0
+
+        for inputs in sampler:
+            print(inputs[0].shape)
+            num_samples = inputs[0].shape[0]
+            inputs = reshape_inputs(inputs)
+            batch_corrects = self.eval_batch(slow_params, fast_params, slow_state, fast_state, *inputs)
+            total_corrects += batch_corrects.sum()
+            total_samples += num_samples
+
+        return total_corrects / total_samples
+        
+
+    @staticmethod
+    def _eval_batch(normalize_fn, slow_apply, fast_apply, slow_params, fast_params, slow_state, fast_state, x, y):
+        x = x / 255
+        x = normalize_fn(x)
+
+        slow_outputs = slow_apply(slow_params, slow_state, None, x, False)[0][0]
+        pred = fast_apply(fast_params, fast_state, None, slow_outputs, False)[0]
+        return (pred.argmax(-1) == y).astype(jnp.int64).sum()
