@@ -58,7 +58,10 @@ class Experiment:
         self.run_name = cfg.run_name
         self.exp_dir = ""
         self.exp_name = cfg.exp_name
-        self.work_dir = osp.dirname(osp.dirname(osp.realpath(__file__)))
+        if cfg.work_dir:
+            self.work_dir = cfg.work_dir
+        else:
+            self.work_dir = osp.dirname(osp.dirname(osp.realpath(__file__)))
 
         if not cfg.no_log:
             self.on_create()
@@ -112,6 +115,7 @@ class Experiment:
         parser.add_argument(
             "--dataset", type=str, choices=["miniimagenet", "omniglot"], required=True
         )
+        parser.add_argument("--work_dir", type=str, default="")
         parser.add_argument("--run_name", type=str, default="")
         parser.add_argument("--exp_name", type=str, default="")
         parser.add_argument("--logcomet", action="store_true", default=False)

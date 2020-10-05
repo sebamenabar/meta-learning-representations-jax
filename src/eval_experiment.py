@@ -410,7 +410,7 @@ def lr_fit_jax(features, y, num_classes):
         previous_optimizer_results=None,
         num_correction_pairs=10,
         # tolerance=1e-08,
-        tolerance=1e-8,
+        tolerance=1e-4,
         x_tolerance=0,
         f_relative_tolerance=0,
         initial_inverse_hessian_estimate=None,
