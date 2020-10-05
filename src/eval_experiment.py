@@ -473,8 +473,9 @@ class GPUMultinomialRegression:
         # self.dataset.rng = rng_data
         accs = []
         # targets = []
-        slow_params = jax.pmap(lambda x: x)(tree_replicate(slow_params, jax.device_count()))
-        slow_state = jax.pmap(lambda x: x)(tree_replicate(slow_state, jax.device_count()))
+        # slow_params = jax.pmap(lambda x: x)(tree_replicate(slow_params, jax.device_count()))
+        # slow_state = jax.pmap(lambda x: x)(tree_replicate(slow_state, jax.device_count()))
+        slow_params, slow_state = send_to_devices((slow_params, slow_state))
         predict_batch = lambda rng, *args: self.predict_batch(
             rng,
             slow_params,
