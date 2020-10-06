@@ -18,9 +18,14 @@ import haiku as hk
 
 from config import rsetattr
 from mrcl_experiment import MetaLearner, replicate_array, MetaMiniImageNet
-from eval_experiment import GPUMultinomialRegression, MAMLTester
+from eval_experiment import (
+    GPUMultinomialRegression,
+    MAMLTester,
+    ParallelSupervisedStandardTester,
+)
 from test_utils import SupervisedStandardTester
 from experiment import Experiment, Logger
+from data.miniimagenet import MiniImageNetDataset
 
 
 def parse_args(parser=None):
@@ -47,6 +52,7 @@ def parse_args(parser=None):
         help="Number of quried samples per class",
         default=15,
     )
+    parser.add_argument("--train.include_spt", default=False, action="store_true")
     parser.add_argument("--train.cl_qry_way", default=64, type=int)
     parser.add_argument("--train.cl_qry_shot", default=1, type=int)
     parser.add_argument("--train.inner_lr", type=float, default=1e-2)
@@ -231,6 +237,17 @@ class Evaluator:
             self.val_dataset2._normalize,
             keep_orig_aug=False,
         )
+        self.sup_dataset = MiniImageNetDataset(
+            "train_val", data_dir,
+        )
+        self.sup_tester = ParallelSupervisedStandardTester(
+            None,
+            self.sup_dataset,
+            jax.device_count() * 128,
+            slow_apply,
+            fast_apply,
+            self.sup_dataset._normalize,
+        )
 
     def eval(
         self,
@@ -242,14 +259,22 @@ class Evaluator:
         inner_lr,
         reset_head,
         eval_aug,
+        sup_eval,
     ):
+        _fast_params = fast_params
         if reset_head != "none":
             fast_params = jax.tree_map(jnp.zeros_like, fast_params)
         exp.log()
-        exp.log("Evaluating LR No-Aug")
 
         out = edict()
 
+        if sup_eval:
+            exp.log("Evaluating supervised loss")
+            out.sup_acc = self.sup_tester.eval(
+                slow_params, _fast_params, slow_state, fast_state
+            )
+
+        exp.log("Evaluating LR No-Aug")
         out.lr_no_aug_acc, out.lr_no_aug_std = self.lr_no_aug_tester.eval(
             slow_params,
             slow_state,
@@ -373,6 +398,7 @@ def main(args, cfg):
                 learner_state.inner_lr,
                 cfg.train.reset_head,
                 cfg.eval_aug,
+                cfg.train.method == "mrcl",
             )
 
             exp.log(f"\nStep {global_step + 1} statistics:")
@@ -397,6 +423,8 @@ def main(args, cfg):
                 exp.log(
                     f"MAML 10-steps Aug Acc: {val_metrics.maml_acc_aug}±{val_metrics.maml_std_aug}"
                 )
+            if cfg.train.method == "mrcl":
+                exp.log(f"Supervised Acc: {val_metrics.sup_acc}")
 
             exp.log_metrics(
                 dict(
@@ -428,6 +456,21 @@ def main(args, cfg):
                             f,
                             protocol=3,
                         )
+
+            inner_scalars = jax.tree_map(
+                lambda x: jnp.mean(x, (0, 1)), scalars_ema["inner"]
+            )
+            outer_scalars = jax.tree_map(jnp.mean, scalars_ema["outer"])
+            exp.log(dict(
+                foa=outer_scalars["final"]["aux"][0]["acc"].item(),
+                fol=outer_scalars["final"]["loss"].item(),
+                ioa=outer_scalars["initial"]["aux"][0]["acc"].item(),
+                iol=outer_scalars["initial"]["loss"].item(),
+                iia=inner_scalars["auxs"][0]["acc"][0].item(),
+                fia=inner_scalars["auxs"][0]["acc"][-1].item(),
+                #  ilr=meta_learner._learner_state.inner_lr[0],
+                olr=meta_learner._scheduler(global_step),
+            ))
 
         if (
             ((global_step % cfg.progress_bar_refresh_rate) == 0)

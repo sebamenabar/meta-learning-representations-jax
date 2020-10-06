@@ -572,8 +572,8 @@ class ParallelSupervisedStandardTester:
         self, rng, dataset, batch_size, slow_apply, fast_apply, normalize_fn=None,
     ):
         self.rng = rng
-        self.x = flatten(dataset._images, (0, 1))
-        self.y = flatten(dataset._labels, (0, 1))
+        self.x = dataset._images
+        self.y = dataset._labels
         self.batch_size = batch_size
         self.normalize_fn = normalize_fn
         self.eval_batch = jax.pmap(jax.partial(
@@ -595,7 +595,6 @@ class ParallelSupervisedStandardTester:
         total_samples = 0
 
         for inputs in sampler:
-            print(inputs[0].shape)
             num_samples = inputs[0].shape[0]
             inputs = reshape_inputs(inputs)
             batch_corrects = self.eval_batch(slow_params, fast_params, slow_state, fast_state, *inputs)
@@ -612,4 +611,4 @@ class ParallelSupervisedStandardTester:
 
         slow_outputs = slow_apply(slow_params, slow_state, None, x, False)[0][0]
         pred = fast_apply(fast_params, fast_state, None, slow_outputs, False)[0]
-        return (pred.argmax(-1) == y).astype(jnp.int64).sum()
+        return (pred.argmax(-1) == y).sum()

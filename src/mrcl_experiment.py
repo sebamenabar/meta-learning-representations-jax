@@ -413,7 +413,7 @@ class MetaLearner:
         self.update_pmap = jax.pmap(
             jax.partial(self._update_fn, **update_fn_kwargs),
             axis_name="i",
-            # static_broadcasted_argnums=range(5, 15),
+            #  static_broadcasted_argnums=range(5, 15),
         )
 
         return get_host_rng(rng_train)
@@ -434,6 +434,7 @@ class MetaLearner:
                     self.train_cfg.way,
                     self.train_cfg.shot,
                     self.train_cfg.qry_shot,
+                    include_spt=self.train_cfg.include_spt,
                     #  self.train_cfg.method == "maml",
                 )
             elif self.train_cfg.method == "mrcl":
@@ -441,6 +442,7 @@ class MetaLearner:
                 rng_train, rng_val = split(rng)
                 dataset = MRCLMiniImageNet(
                     self.train_cfg.cl_qry_shot,
+                    self.train_cfg.include_spt,
                     rng_train,
                     "train",
                     self._data_root,
@@ -448,19 +450,20 @@ class MetaLearner:
                     self.train_cfg.way,
                     self.train_cfg.shot,
                     self.train_cfg.qry_shot,
+
                     #  self.train_cfg.method == "maml",
                 )
 
             self._normalize_fn = dataset._normalize
-                # self.val_dataset = MetaMiniImageNet(
-                #     rng_val,
-                #     "val",
-                #     self._data_root,
-                #     self.val_cfg.batch_size,
-                #     self.train_cfg.way,
-                #     self.train_cfg.shot,
-                #     self.train_cfg.qry_shot,
-                # )
+            # self.val_dataset = MetaMiniImageNet(
+            #     rng_val,
+            #     "val",
+            #     self._data_root,
+            #     self.val_cfg.batch_size,
+            #     self.train_cfg.way,
+            #     self.train_cfg.shot,
+            #     self.train_cfg.qry_shot,
+            # )
 
         return dataset
 
@@ -502,8 +505,8 @@ class MetaLearner:
         if self.train_cfg.scheduler == "cosine":
             return delayed_cosine_decay_schedule(
                 -self.train_cfg.outer_lr,
-                self.train_cfg.cosine_transition_begin,  # * self._apply_every,
-                self.train_cfg.cosine_decay_steps,  # * self._apply_every,
+                self.train_cfg.cosine_delay,  # * self._apply_every,
+                self.train_cfg.cosine_steps,  # * self._apply_every,
                 self.train_cfg.cosine_alpha,
             )
         elif self.train_cfg.scheduler == "step":
@@ -569,6 +572,7 @@ class MetaMiniImageNet:
         shot,
         qry_shot,
         shuffled_labels=True,
+        include_spt=False,
     ):
         self._rng = rng
         self._batch_size = batch_size
@@ -576,6 +580,7 @@ class MetaMiniImageNet:
         self._shot = shot
         self._qry_shot = qry_shot
         self._shuffled_labels = shuffled_labels
+        self.include_spt = include_spt
 
         if split == "train":
             self._fp = osp.join(
@@ -614,12 +619,19 @@ class MetaMiniImageNet:
 
     def __next__(self):
         self._rng, rng = split(self._rng)
-        return self.fsl_build(*self.fsl_sample(rng))
+        x_spt, y_spt, x_qry, y_qry = self.fsl_build(*self.fsl_sample(rng))
+        if self.include_spt:
+            x_qry = onp.concatenate((x_spt, x_qry), 1)
+            y_qry = onp.concatenate((y_spt, y_qry), 1)
+        return x_spt, y_spt, x_qry, y_qry
+
+
 
 class MRCLMiniImageNet(MetaMiniImageNet):
-    def __init__(self, cl_qry_shot, *args, **kwargs):
+    def __init__(self, cl_qry_shot, include_spt, *args, **kwargs):
         super().__init__(*args, **kwargs, shuffled_labels=False)
 
+        self.include_spt = include_spt
         self.cl_qry_shot = cl_qry_shot
         self.flat_images = flatten(self._images, (0, 1))
         self.flat_labels = flatten(self._labels, (0, 1))
@@ -627,17 +639,27 @@ class MRCLMiniImageNet(MetaMiniImageNet):
     def __next__(self):
         self._rng, rng_fsl, rng_cl = split(self._rng, 3)
         x_spt, y_spt, x_qry, y_qry = self.fsl_build(*self.fsl_sample(rng_fsl))
-        cl_idxs = jax.random.choice(rng_cl, onp.arange(len(self.flat_images)), (self._batch_size * self.cl_qry_shot,), replace=False)
-        
+        cl_idxs = jax.random.choice(
+            rng_cl,
+            onp.arange(len(self.flat_images)),
+            (self._batch_size * self.cl_qry_shot,),
+            replace=False,
+        )
+
         # print(cl_idxs.shape, self.flat_images.shape)
 
         x_qry_cl = self.flat_images[cl_idxs]
         y_qry_cl = self.flat_labels[cl_idxs]
-        x_qry_cl = onp.reshape(x_qry_cl, (self._batch_size, self.cl_qry_shot, *x_qry_cl.shape[1:]))
-        y_qry_cl = onp.reshape(y_qry_cl, (self._batch_size, self.cl_qry_shot, *y_qry_cl.shape[1:]))
-        x_qry = onp.concatenate((x_spt, x_qry, x_qry_cl), 1)
-        y_qry = onp.concatenate((y_spt, y_qry, y_qry_cl), 1)
+        x_qry_cl = onp.reshape(
+            x_qry_cl, (self._batch_size, self.cl_qry_shot, *x_qry_cl.shape[1:])
+        )
+        y_qry_cl = onp.reshape(
+            y_qry_cl, (self._batch_size, self.cl_qry_shot, *y_qry_cl.shape[1:])
+        )
+        if self.include_spt:
+            x_qry = onp.concatenate((x_spt, x_qry, x_qry_cl), 1)
+            y_qry = onp.concatenate((y_spt, y_qry, y_qry_cl), 1)
+        else:
+            x_qry = onp.concatenate((x_qry, x_qry_cl), 1)
+            y_qry = onp.concatenate((y_qry, y_qry_cl), 1)
         return x_spt, y_spt, x_qry, y_qry
-
-
-
