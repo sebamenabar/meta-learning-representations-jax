@@ -399,7 +399,7 @@ def lr_fit_jax(features, y, num_classes):
     num_features = features.shape[-1]
     W_size = (batch_size, (num_features + 1) * num_classes)
     W = jnp.zeros(W_size, dtype=features.dtype)
-    c = 10.0
+    c = 1.0
 
 
     minimized = tfp.optimizer.lbfgs_minimize(
