@@ -240,6 +240,9 @@ class Evaluator:
         self.sup_dataset = MiniImageNetDataset(
             "train_val", data_dir,
         )
+
+        print("device count:", jax.device_count())
+
         self.sup_tester = ParallelSupervisedStandardTester(
             None,
             self.sup_dataset,

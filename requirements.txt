@@ -6,3 +6,4 @@ tensorboardX
 comet_ml
 optax
 tfp-nightly[jax]
+cloud-tpu-profiler>=2.3.0

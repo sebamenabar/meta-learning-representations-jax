@@ -60,12 +60,13 @@ MetaLearnerState = namedtuple(
 )
 
 
-def reshape_inputs(inputs):
+def reshape_inputs(inputs, leading_dim=None):
     rets = []
-    leading_dim = jax.local_device_count()
+    if leading_dim is None:
+        leading_dim = jax.local_device_count()
     for x in inputs:
         per_device_batch_size, ragged = divmod(x.shape[0], leading_dim)
-        assert ragged == 0
+        assert ragged == 0, f"x shape: {x.shape}, leading_dim: {leading_dim}"
         rets.append(x.reshape(leading_dim, per_device_batch_size, *x.shape[1:]))
     return tuple(rets)
 

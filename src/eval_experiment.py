@@ -574,29 +574,37 @@ class ParallelSupervisedStandardTester:
         self.rng = rng
         self.x = dataset._images
         self.y = dataset._labels
-        self.batch_size = batch_size
+        #self.batch_size = batch_size
+        self.batch_size = 128
         self.normalize_fn = normalize_fn
-        self.eval_batch = jax.pmap(jax.partial(
+        # self.eval_batch = jax.pmap(jax.partial(
+        #     self._eval_batch, normalize_fn, slow_apply, fast_apply,
+        #     ), axis_name="i")
+        self.eval_batch = jax.jit(jax.partial(
             self._eval_batch, normalize_fn, slow_apply, fast_apply,
-            ), axis_name="i")
+            ))
 
     def eval(self, slow_params, fast_params, slow_state, fast_state):
         rng = jax.random.PRNGKey(0)
         sampler = BatchSampler(rng, self.x, self.y, self.batch_size, shuffle=True, keep_last=True)
     
-        (slow_params, fast_params, slow_state, fast_state) = send_to_devices(
-            (slow_params,
-            fast_params,
-            slow_state,
-            fast_state,)
-        )
+        # (slow_params, fast_params, slow_state, fast_state) = send_to_devices(
+        #     (slow_params,
+        #     fast_params,
+        #     slow_state,
+        #     fast_state,)
+        # )
 
         total_corrects = 0
         total_samples = 0
 
         for inputs in sampler:
             num_samples = inputs[0].shape[0]
-            inputs = reshape_inputs(inputs)
+            # print(inputs[0].shape)
+
+            # try:
+            #     inputs = reshape_inputs(inputs, jax.device_count())
+            
             batch_corrects = self.eval_batch(slow_params, fast_params, slow_state, fast_state, *inputs)
             total_corrects += batch_corrects.sum()
             total_samples += num_samples
