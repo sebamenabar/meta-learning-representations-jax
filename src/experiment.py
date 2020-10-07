@@ -133,9 +133,9 @@ class Experiment:
     def logcomet(self):
         return self.cfg.logcomet
 
-    def log_metrics(self, metrics, step=None, prefix=""):
+    def log_metrics(self, metrics, step=None, prefix="", epoch=None,):
         if self.comet:
-            self.comet.log_metrics(metrics, step=step, prefix=prefix)
+            self.comet.log_metrics(metrics, step=step, prefix=prefix, epoch=epoch,)
         if self.tensorboard:
             for name, val in metrics.items():
                 if prefix:

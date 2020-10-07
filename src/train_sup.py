@@ -118,7 +118,10 @@ def parse_args():
         choices=["bn", "custom", "gn", "in", "ln"],
     )
     parser.add_argument(
-        "--model.no_head_bias", default=True, action="store_false", dest="model.head_bias"
+        "--model.no_head_bias",
+        default=True,
+        action="store_false",
+        dest="model.head_bias",
     )
     parser.add_argument(
         "--model.initializer",
@@ -321,6 +324,7 @@ if __name__ == "__main__":
     )
     curr_step = 0
     best_sup_val_acc = 0
+    scalars_ema = None
     for epoch in range(1, cfg.epochs + 1):
         schedule_state = ox.ScaleByScheduleState(
             count=schedule_state.count + 1,
@@ -344,6 +348,18 @@ if __name__ == "__main__":
                 -1
             ] = schedule_state  # Before and after for checkpointing and safety
 
+            # loss=f"{loss:.3f}",
+            # acc=f"{aux[0]['acc'].mean():.2f}",
+
+            if scalars_ema is None:
+                scalars_ema = dict(loss=loss, acc=aux[0]["acc"].mean())
+            else:
+                scalars_ema = jax.tree_multimap(
+                    lambda ema, x: ema * 0.99 + x * 0.01,
+                    scalars_ema,
+                    dict(loss=loss, acc=aux[0]["acc"].mean()),
+                )
+
             curr_step += 1
             if ((epoch == 1) and (j == 0)) or (
                 (j == (len(train_loader) - 1))
@@ -353,12 +369,6 @@ if __name__ == "__main__":
                 # Test supervised learning
                 # sup_std_loss, sup_std_acc = supervised_std_tester(
                 #     partial(test_pred_fn, *params, *state, rng_test)
-                # )
-
-                # exp.log_metrics(
-                #     {"sup_acc": sup_std_acc, "sup_loss": sup_std_loss},
-                #     step=curr_step,
-                #     prefix="val",
                 # )
 
                 val_metrics = evaluator.eval(
@@ -372,6 +382,12 @@ if __name__ == "__main__":
                     sup_eval=True,
                 )
 
+                exp.log_metrics(
+                    {"acc": 100 * val_metrics.sup_acc, **val_metrics},
+                    step=curr_step,
+                    epoch=epoch,
+                    prefix="validate",
+                )
                 exp.log(f"\nValidation epoch {epoch} results:")
                 exp.log(
                     f"Logistic Regression No-Aug Acc: {val_metrics.lr_no_aug_acc}±{val_metrics.lr_no_aug_std}"
@@ -419,13 +435,17 @@ if __name__ == "__main__":
 
             elif (curr_step % cfg.progress_bar_refresh_rate) == 0:
                 exp.log_metrics(
-                    {"acc": aux[0]["acc"].mean(), "sup_loss": loss},
+                    {
+                        "acc": 100 * scalars_ema["acc"],
+                        "loss": scalars_ema["loss"],
+                        "lr": schedule(opt_state[-1].count),
+                    },
                     step=curr_step,
                     prefix="train",
                 )
                 pbar.set_postfix(
-                    loss=f"{loss:.3f}",
-                    acc=f"{aux[0]['acc'].mean():.2f}",
+                    loss=f"{scalars_ema['loss']:.3f}",
+                    acc=f"{scalars_ema['acc']:.2f}",
                     lr=f"{schedule(opt_state[-1].count):.4f}",
                     # val_acc=f"{sup_std_acc:.3f}",
                     # val_loss=f"{sup_std_loss:.3f}",
