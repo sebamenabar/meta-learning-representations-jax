@@ -181,6 +181,7 @@ class MetaLearner:
         augment,
         augment_fn,
         num_inner_steps,
+        track_slow_state,
         slow_apply,
         fast_apply,
         opt_update_fn,
@@ -206,7 +207,7 @@ class MetaLearner:
 
         _inner_loop = jax.partial(
             fsl_inner_loop,
-            is_training=True,
+            is_training="inner" in track_slow_state,
             # num_steps=self.train_cfg.num_inner_steps,
             num_steps=num_inner_steps,
             # slow_apply=self._encoder.apply,
@@ -219,7 +220,7 @@ class MetaLearner:
         )
         _outer_loop = jax.partial(
             outer_loop,
-            is_training=True,
+            is_training="outer" in track_slow_state,
             inner_loop=_inner_loop,
             # slow_apply=self._encoder.apply,
             slow_apply=slow_apply,
@@ -228,6 +229,7 @@ class MetaLearner:
             loss_fn=mean_xe_and_acc_dict,
             # reset_fast_params_fn=self.reset_classifier,
             reset_fast_params_fn=reset_fast_params_fn,
+            track_slow_state=track_slow_state,
         )
         _batched_outer_loop = jax.partial(batched_outer_loop, outer_loop=_outer_loop)
 
@@ -410,6 +412,7 @@ class MetaLearner:
             reset_fast_params_fn=self.reset_classifier,
             learn_inner_lr=self.train_cfg.learn_inner_lr,
             optimizer=self._optimizer,
+            track_slow_state=self.model_cfg.track_stats,
         )
         self.update_pmap = jax.pmap(
             jax.partial(self._update_fn, **update_fn_kwargs),

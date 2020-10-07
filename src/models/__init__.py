@@ -27,12 +27,17 @@ def prepare_model(
     norm_before_act=None,
     final_norm=False,
     normalize="bn",
+    norm_init_zero=False,
+    learn_residual_step=False,
 ):
     if dataset == "miniimagenet":
         max_pool = True
         spatial_dims = 25
 
     if model_name == "resnet12":
+        bn_config = dict()
+        if norm_init_zero:
+            bn_config["scale_init"] = hk.initializers.Constant(0.)
         print("track stats", track_stats != "none")
         model = make_resnet12(
             avg_pool=True,
@@ -40,6 +45,8 @@ def prepare_model(
             activation=activation,
             test_local_stats=track_stats == "none",
             normalize=normalize,
+            bn_config=bn_config,
+            learn_residual_step=learn_residual_step,
 
         )
     elif model_name == "convnet4":
