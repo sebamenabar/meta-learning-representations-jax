@@ -263,6 +263,7 @@ class Evaluator:
         reset_head,
         eval_aug,
         sup_eval,
+        maml_eval=True,
     ):
         _fast_params = fast_params
         if reset_head != "none":
@@ -288,26 +289,27 @@ class Evaluator:
                 slow_params,
                 slow_state,
             )
-        exp.log("Evaluating MAML No-Aug")
-        (
-            out.maml_acc_no_aug,
-            out.maml_std_no_aug,
-        ) = self.maml_tester_no_aug_10_steps.eval(
-            slow_params,
-            fast_params,
-            slow_state,
-            fast_state,
-            inner_lr,
-        )
-        if eval_aug:
-            exp.log("Evaluating MAML Aug")
-            out.maml_acc_aug, out.maml_std_aug = self.maml_tester_aug_10_steps.eval(
+        if maml_eval:
+            exp.log("Evaluating MAML No-Aug")
+            (
+                out.maml_acc_no_aug,
+                out.maml_std_no_aug,
+            ) = self.maml_tester_no_aug_10_steps.eval(
                 slow_params,
                 fast_params,
                 slow_state,
                 fast_state,
                 inner_lr,
             )
+            if eval_aug:
+                exp.log("Evaluating MAML Aug")
+                out.maml_acc_aug, out.maml_std_aug = self.maml_tester_aug_10_steps.eval(
+                    slow_params,
+                    fast_params,
+                    slow_state,
+                    fast_state,
+                    inner_lr,
+                )
 
         return out
 

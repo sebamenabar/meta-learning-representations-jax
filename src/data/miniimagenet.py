@@ -2,6 +2,7 @@ from jax.tree_util import Partial as partial
 import pickle
 import os.path as osp
 import numpy as onp
+from lib import flatten
 
 
 # mean = onp.array([0.4707837, 0.4494574, 0.4026407])
@@ -33,10 +34,13 @@ class MiniImageNetDataset:
                 data_root,
                 "miniImageNet_category_split_train_phase_train_ordered.pickle",
             )
+            self._images, self._labels, _ = prepare_data(self._fp)
+            self._images = flatten(self._images, (0, 1))
+            self._labels = flatten(self._labels, (0, 1))
         elif split == "train_val":
             self._fp = osp.join(
                 data_root,
                 "miniImageNet_category_split_train_phase_val_ordered.pickle",
             )
-        self._images, self._labels, _ = prepare_data(self._fp)
+            self._images, self._labels, _ = prepare_data(self._fp)
         self._normalize = partial(normalize_fn, mean=mean, std=std)

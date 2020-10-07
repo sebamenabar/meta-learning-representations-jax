@@ -33,6 +33,7 @@ def prepare_model(
         spatial_dims = 25
 
     if model_name == "resnet12":
+        print("track stats", track_stats != "none")
         model = make_resnet12(
             avg_pool=True,
             w_initializer=initializer,
@@ -42,8 +43,7 @@ def prepare_model(
 
         )
     elif model_name == "convnet4":
-
-        print(track_stats != "none")
+        print("track stats", track_stats != "none")
 
         model = hk.transform_with_state(
             lambda x, is_training: MiniImagenetCNNBody(

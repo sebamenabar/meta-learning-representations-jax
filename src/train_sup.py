@@ -38,14 +38,36 @@ from lib import (
 from models.activations import activations
 from test_utils import SupervisedStandardTester, SupervisedCosineTester
 from data import augment
+from main_loop import Evaluator
+from data.miniimagenet import MiniImageNetDataset
 
 # import utils.augmentations as augmentations
 
 
-def step(rng, params, state, inputs, targets, opt_state, loss_fn, opt_update_fn):
-    rng, rng_step = split(rng)
+def step(
+    rng,
+    params,
+    state,
+    inputs,
+    targets,
+    opt_state,
+    loss_fn,
+    opt_update_fn,
+    normalize_fn=None,
+    augment_fn=None,
+):
+    rng, rng_step, rng_augment = split(rng, 3)
+    inputs = inputs / 255
+    if augment_fn:
+        inputs = augment_fn(rng_augment, inputs)
+    if normalize_fn:
+        inputs = normalize_fn(inputs)
     (loss, (state, aux)), grads = value_and_grad(loss_fn, (0, 1), has_aux=True)(
-        *params, *state, rng_step, inputs, targets,
+        *params,
+        *state,
+        rng_step,
+        inputs,
+        targets,
     )
     # print(grads)
     updates, opt_state = opt_update_fn(grads, opt_state, params)
@@ -84,8 +106,25 @@ def parse_args():
         "--model.name", default="resnet12", choices=["convnet4", "resnet12"]
     )
     parser.add_argument("--model.hidden_size", default=64, type=int)
-    parser.add_argument("--model.no_track_bn_stats", default=False, action="store_true")
-    parser.add_argument("--model.normalization", default="bn", choices=["bn", "custom", "gn", "in", "ln"])
+    parser.add_argument(
+        "--model.no_track_bn_stats",
+        default=True,
+        action="store_false",
+        dest="model.track_bn_stats",
+    )
+    parser.add_argument(
+        "--model.normalization",
+        default="bn",
+        choices=["bn", "custom", "gn", "in", "ln"],
+    )
+    parser.add_argument(
+        "--model.no_head_bias", default=True, action="store_false", dest="model.head_bias"
+    )
+    parser.add_argument(
+        "--model.initializer",
+        default="kaiming_normal",
+        choices=["kaiming_normal", "glorot_uniform"],
+    )
     parser.add_argument(
         "--model.activation",
         type=str,
@@ -94,22 +133,27 @@ def parse_args():
     )
 
     # FSL evaluation arguments
-    parser.add_argument("--val.batch_size", type=int, default=128)
+    parser.add_argument("--val.batch_size", type=int, default=16)
+    parser.add_argument("--val.num_tasks", type=int, default=600)
+    parser.add_argument(
+        "--no_eval_aug", action="store_false", default=True, dest="eval_aug"
+    )
+    # parser.add_argument("--val.fsl_batch_size", type=int, default=16)
 
     # Training hyperparameters
     parser.add_argument("--epochs", default=100, type=int)
-    parser.add_argument("--batch_size", default=64, type=int)
+    parser.add_argument("--train.batch_size", default=64, type=int)
     parser.add_argument("--lr", default=5e-2, type=float)
     parser.add_argument("--lr_schedule", nargs="*", type=int, default=[60, 80])
     parser.add_argument("--momentum", default=0.9, type=float)
     parser.add_argument("--weight_decay", default=5e-4, type=float)
     parser.add_argument("--val_interval", default=1, type=int)  # In epochs
     parser.add_argument(
-        "--data_augment", default=False, action="store_true"
+        "--train.augment", default="all", choices=["none", "all"]
     )  # In epochs
 
     args = parser.parse_args()
-    cfg = edict(model=edict(), val=edict(fsl=edict(), sup=edict()))
+    cfg = edict(train=edict(), model=edict(), val=edict(fsl=edict(), sup=edict()))
     for argname, argval in vars(args).items():
         rsetattr(cfg, argname, argval)
 
@@ -137,24 +181,23 @@ def parse_args():
 if __name__ == "__main__":
     args, cfg = parse_args()
     exp = Experiment(cfg, args)
-    exp.logfile_init(
-        [sys.stdout]
-    )  # Send logged stuff also to stdout (but not all stdout to log)
-    exp.loggers_init()
-    sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
+    if not cfg.no_log:
+        exp.logfile_init(
+            [sys.stdout]
+        )  # Send logged stuff also to stdout (but not all stdout to log)
+        exp.loggers_init()
+        sys.stderr = Logger(exp.logfile, [sys.stderr])  # Send stderr to log
 
     if cfg.debug:  # Debugging creates experiments folders in experiments/debug dir
         exp.log("Debugging ...")
 
     jit_enabled = not cfg.disable_jit
 
-    if cfg.dataset == "omniglot" and cfg.prefetch_data_gpu:
-        default_platform = "gpu"
-    else:
-        default_platform = "cpu"
-    cpu, device = setup_device(
-        cfg.gpus, default_platform
-    )  # gpu is None if cfg.gpus == 0
+    exp.log(f"JAX available CPUS {jax.devices('cpu')}")
+    try:
+        exp.log(f"JAX available GPUS {jax.devices('gpu')}")
+    except RuntimeError:
+        pass
     rng = random.PRNGKey(cfg.seed)
 
     """
@@ -164,43 +207,43 @@ if __name__ == "__main__":
         val_images: [18748, 84, 84, 3]
         val_labels: [18748]
     """
-    train_images, train_labels, normalize_fn = prepare_data(
-        cfg.dataset,
-        osp.join(
-            cfg.data_dir,
-            "miniImageNet_category_split_train_phase_train_ordered.pickle",
-        ),
-        device,
-    )
-    train_images = flatten(train_images, (0, 1))  # [64 * 600, *image_shape]
-    train_labels = flatten(train_labels, (0, 1))  # [64 * 600]
-    val_images, val_labels, normalize_fn = prepare_data(
-        cfg.dataset,
-        osp.join(
-            cfg.data_dir, "miniImageNet_category_split_train_phase_val_ordered.pickle",
-        ),
-        device,
-    )
-    exp.log("Train data:", train_images.shape, train_labels.shape)
-    exp.log("Validation data:", val_images.shape, val_labels.shape)
 
-    # output_size = sup_train_images.shape[0]
-    output_size = 64
+    train_dataset = MiniImageNetDataset("train", cfg.data_dir)
+    # val_dataset = MiniImageNetDataset("train_val", cfg.data_dir)
+    rng, rng_sampler = split(rng)
+    train_loader = BatchSampler(
+        rng_sampler,
+        train_dataset._images,
+        train_dataset._labels,
+        cfg.train.batch_size,
+        shuffle=True,
+        keep_last=False,
+    )
+
+    exp.log("Train data:", train_dataset._images.shape, train_dataset._labels.shape)
+    #  exp.log("Validation data:", val_dataset._images.shape, val_dataset._labels.shape)
+
+    output_size = 64  # TEMP
     body, head = prepare_model(
-        cfg.model.name,
         cfg.dataset,
+        cfg.model.name,
         output_size,
         hidden_size=cfg.model.hidden_size,
         avg_pool=True,
         activation=cfg.model.activation,
-        initializer="kaiming_normal",
-        track_stats=not cfg.model.no_track_bn_stats,
-        head_bias=True,
+        initializer=cfg.model.initializer,
+        track_stats=cfg.model.track_bn_stats,
+        head_bias=cfg.model.head_bias,
         normalize=cfg.model.normalization,
     )
     rng, rng_params = split(rng)
     (slow_params, fast_params, slow_state, fast_state,) = make_params(
-        rng, cfg.dataset, body.init, body.apply, head.init,
+        rng,
+        cfg.dataset,
+        body.init,
+        body.apply,
+        head.init,
+        train_dataset._normalize(next(iter(train_loader))[0] / 255),
     )
     params = (slow_params, fast_params)
     state = (slow_state, fast_state)
@@ -225,35 +268,52 @@ if __name__ == "__main__":
         "is_training": True,
     }
     train_apply_and_loss_fn = partial(apply_and_loss_fn, **train_apply_fn_kwargs)
-    rng, rng_sampler = split(rng)
-    train_sampler = BatchSampler(
-        rng_sampler, train_images, train_labels, cfg.batch_size,
-    )
-    test_pred_fn = jit(
-        partial(
-            pred_fn, is_training=False, slow_apply=body.apply, fast_apply=head.apply
-        )
-    )
+    # rng, rng_sampler = split(rng)
 
-    rng, rng_std_tester, rng_cosine_tester = split(rng, 3)
-    supervised_std_tester = SupervisedStandardTester(
-        rng_std_tester,
-        val_images,
-        val_labels,
-        cfg.val.batch_size,
-        normalize_fn,
-        device,
-    )
+    # test_pred_fn = jit(
+    #     partial(
+    #         pred_fn, is_training=False, slow_apply=body.apply, fast_apply=head.apply
+    #     )
+    # )
+
+    # rng, rng_std_tester, rng_cosine_tester = split(rng, 3)
+    # supervised_std_tester = SupervisedStandardTester(
+    #     rng_std_tester,
+    #     val_images,
+    #     val_labels,
+    #     cfg.val.batch_size,
+    #     normalize_fn,
+    #     device,
+    # )
+
+    if cfg.train.augment == "all":
+        augment_fn = augment
+        exp.log("Using data augment")
+    else:
+        augment_fn = None
 
     step_ins = jit(
-        partial(step, loss_fn=train_apply_and_loss_fn, opt_update_fn=opt.update)
+        partial(
+            step,
+            loss_fn=train_apply_and_loss_fn,
+            opt_update_fn=opt.update,
+            normalize_fn=train_dataset._normalize,
+            augment_fn=augment_fn,
+        )
     )
-    augment = jit(augment)
-    normalize_fn = jit(normalize_fn)
+    #  augment = jit(augment)
+    #  normalize_fn = jit(normalize_fn)
+
+    evaluator = Evaluator(
+        cfg.data_dir,
+        cfg.val,
+        body.apply,
+        head.apply,
+    )
 
     pbar = tqdm(
         range(1),
-        total=(((train_images.shape[0] // cfg.batch_size)) * cfg.epochs),
+        total=(((train_dataset._images.shape[0] // cfg.train.batch_size)) * cfg.epochs),
         file=sys.stdout,
         miniters=25,
         mininterval=5,
@@ -265,16 +325,16 @@ if __name__ == "__main__":
         schedule_state = ox.ScaleByScheduleState(
             count=schedule_state.count + 1,
         )  # Unsafe for max int
-        # sampler = batch_sampler(rng, train_images, train_labels, cfg.batch_size)
+        # sampler = batch_sampler(rng, train_images, train_labels, train.cfg.batch_size)
         pbar.set_description(f"E:{epoch}")
-        for j, (X, y) in enumerate(train_sampler):
+        for j, (X, y) in enumerate(train_loader):
             rng_augment, rng_step, rng = split(rng, 3)
-            X = jax.device_put(X, device)
-            y = jax.device_put(y, device)
-            X = X / 255
-            if cfg.data_augment:
-                X = augment(rng_augment, X)
-            X = normalize_fn(X)
+            # X = jax.device_put(X, device)
+            # y = jax.device_put(y, device)
+            # X = X / 255
+            # if cfg.data_augment:
+            #     X = augment(rng_augment, X)
+            # X = normalize_fn(X)
 
             opt_state[-1] = schedule_state
             params, state, opt_state, loss, aux = step_ins(
@@ -286,27 +346,43 @@ if __name__ == "__main__":
 
             curr_step += 1
             if ((epoch == 1) and (j == 0)) or (
-                (j == (len(train_sampler) - 1))
+                (j == (len(train_loader) - 1))
                 and ((epoch == cfg.epochs) or ((epoch % cfg.val_interval) == 0))
             ):
-                rng, rng_test = split(rng)
+                # rng, rng_test = split(rng)
                 # Test supervised learning
-                sup_std_loss, sup_std_acc = supervised_std_tester(
-                    partial(test_pred_fn, *params, *state, rng_test)
-                )
+                # sup_std_loss, sup_std_acc = supervised_std_tester(
+                #     partial(test_pred_fn, *params, *state, rng_test)
+                # )
 
-                exp.log_metrics(
-                    {"sup_acc": sup_std_acc, "sup_loss": sup_std_loss},
-                    step=curr_step,
-                    prefix="val",
+                # exp.log_metrics(
+                #     {"sup_acc": sup_std_acc, "sup_loss": sup_std_loss},
+                #     step=curr_step,
+                #     prefix="val",
+                # )
+
+                val_metrics = evaluator.eval(
+                    exp,
+                    *params,
+                    *state,
+                    inner_lr=None,
+                    reset_head=None,
+                    eval_aug=cfg.eval_aug,
+                    maml_eval=False,
+                    sup_eval=True,
                 )
 
                 exp.log(f"\nValidation epoch {epoch} results:")
                 exp.log(
-                    f"Supervised standard accuracy: {sup_std_acc}, loss: {sup_std_loss}"
+                    f"Logistic Regression No-Aug Acc: {val_metrics.lr_no_aug_acc}±{val_metrics.lr_no_aug_std}"
                 )
-                if sup_std_acc > best_sup_val_acc:
-                    best_sup_val_acc = sup_std_acc
+                if cfg.eval_aug:
+                    exp.log(
+                        f"Logistic Regression Aug Acc: {val_metrics.lr_aug_acc}±{val_metrics.lr_aug_std}"
+                    )
+                exp.log(f"Supervised Acc: {val_metrics.sup_acc}")
+                if val_metrics.sup_acc > best_sup_val_acc:
+                    best_sup_val_acc = val_metrics.sup_acc
                     exp.log(
                         f"\nNew best supervised validation accuracy: {best_sup_val_acc}"
                     )
@@ -317,8 +393,9 @@ if __name__ == "__main__":
                     ) as f:
                         dill.dump(
                             {
-                                "val_acc": sup_std_acc,
-                                "val_loss": sup_std_loss,
+                                # "val_acc": sup_std_acc,
+                                # "val_loss": sup_std_loss,
+                                **val_metrics,
                                 "optimizer_state": opt_state,
                                 "slow_params": params[0],
                                 "fast_params": params[1],
@@ -336,8 +413,8 @@ if __name__ == "__main__":
                     loss=f"{loss:.3f}",
                     acc=f"{aux[0]['acc'].mean():.2f}",
                     lr=f"{schedule(opt_state[-1].count):.4f}",
-                    val_acc=f"{sup_std_acc:.3f}",
-                    val_loss=f"{sup_std_loss:.3f}",
+                    # val_acc=f"{sup_std_acc:.3f}",
+                    # val_loss=f"{sup_std_loss:.3f}",
                 )
 
             elif (curr_step % cfg.progress_bar_refresh_rate) == 0:
@@ -350,8 +427,8 @@ if __name__ == "__main__":
                     loss=f"{loss:.3f}",
                     acc=f"{aux[0]['acc'].mean():.2f}",
                     lr=f"{schedule(opt_state[-1].count):.4f}",
-                    val_acc=f"{sup_std_acc:.3f}",
-                    val_loss=f"{sup_std_loss:.3f}",
+                    # val_acc=f"{sup_std_acc:.3f}",
+                    # val_loss=f"{sup_std_loss:.3f}",
                 )
 
             pbar.update()
@@ -364,8 +441,9 @@ if __name__ == "__main__":
     with open(osp.join(exp.exp_dir, "checkpoints/last.ckpt"), "wb") as f:
         dill.dump(
             {
-                "val_acc": sup_std_acc,
-                "val_loss": sup_std_loss,
+                # "val_acc": sup_std_acc,
+                # "val_loss": sup_std_loss,
+                **val_metrics,
                 "optimizer_state": opt_state,
                 "slow_params": params[0],
                 "fast_params": params[1],
