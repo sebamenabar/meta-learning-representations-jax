@@ -130,7 +130,7 @@ def parse_args(parser=None):
         type=str,
         choices=["kaiming_normal", "glorot_uniform"],
     )
-    parser.add_argument("--model.avg_pool", default=True, action="store_true")
+    parser.add_argument("--model.no_avg_pool", default=True, action="store_false", dest="model.avg_pool")
     parser.add_argument("--model.head_bias", default=False, action="store_true")
     parser.add_argument("--model.norm_before_act", default=1, type=int, choices=[0, 1])
     parser.add_argument("--model.norm_init_zero", default=False, action="store_true")

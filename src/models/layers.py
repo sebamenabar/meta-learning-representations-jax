@@ -6,6 +6,22 @@ import haiku as hk
 from typing import Optional, Sequence
 
 
+def get_norm(norm_name, **kwargs):
+    if norm_name == "bn":
+        # print("Using batch normalization")
+        norm = lambda name: hk.BatchNorm(**kwargs, name=name)
+    elif norm_name == "custom":
+        # print("Using my batch normalization")
+        norm = lambda name: MyBatchNorm(**kwargs, name=name)
+    elif norm_name == "affine":
+        #  print("Using affine normalization")
+        norm = lambda name: Affine(name=name)
+    elif norm_name == "none":
+        norm = lambda name: lambda x, _: x
+
+    return norm
+
+
 class Affine(hk.Module):
     def __call__(self, x):
         w_dtype = x.dtype

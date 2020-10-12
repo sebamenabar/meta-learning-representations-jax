@@ -1,5 +1,6 @@
 import pickle
 import os.path as osp
+import numpy as onp
 
 
 # from PIL import Image
@@ -9,6 +10,10 @@ import os.path as osp
 
 # mean = onp.array((0.9220594763755798))
 # std = onp.array((0.2477845698595047))
+train_train_mean = onp.array((0.9195019446031442))
+train_train_std = onp.array((0.23467870686722328))
+trainval_mean = onp.array((0.9185461957085734))
+trainval_std = onp.array((0.23590285459774205))
 
 
 # def prepare_data(split="train"):
@@ -39,3 +44,20 @@ def prepare_data(data_dir, split="train"):
     images = data["image_data"]
     labels = data["labels"]
     return images, labels
+
+
+class OmniglotDataset:
+    def __init__(self, split, data_dir):
+        # if split == "train":
+        self.fp = osp.join(data_dir, f"omniglot-resized28-{split}.pkl")
+        with open(self.fp, "rb") as f:
+            data = pickle.load(f)
+        self.images = data["image_data"]
+        self.labels = data["labels"]
+        self.labels = self.labels - self.labels.min()
+        if "mean" in data:
+            self.mean = data["mean"]
+            self.std = data["std"]
+        else:
+            self.mean = None
+            self.std = None

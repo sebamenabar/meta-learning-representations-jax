@@ -435,16 +435,19 @@ def cl_inner_loop(
     losses = []
     auxs = []
 
-    for i in range(inputs.shape[0]):
+    for i, (_rng, _y, *_so) in enumerate(zip(rngs, jnp.expand_dims(targets, 1), *[jnp.expand_dims(so, 1) for so in slow_outputs])):
         (loss, (new_fast_state, *aux)), grads = value_and_grad(
             _fast_apply_and_loss_fn, has_aux=True
         )(
             fast_params,
             fast_state,
-            rngs[i],
-            [so[[i]] for so in slow_outputs],
+            # rngs[i],
+            _rng,
+            # [so[[i]] for so in slow_outputs],
+            _so,
             is_training,
-            targets[[i]],
+            # targets[[i]],
+            _y,
         )
         if update_state:
             fast_state = new_fast_state

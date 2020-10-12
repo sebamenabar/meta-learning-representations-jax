@@ -29,6 +29,8 @@ def get_norm(norm_name, **kwargs):
     elif norm_name == "affine":
         # print("Using affine normalization")
         norm = lambda name: Affine(name=name)
+    elif norm_name == "none":
+        norm = lambda name: lambda x, _: x
 
     return norm
 
