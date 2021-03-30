@@ -2,6 +2,14 @@ import numpy as onp
 from jax import numpy as jnp, random, tree_util as tree
 
 
+def first_leaf_shape(struct):
+    return tree.tree_flatten(struct)[0][0].shape
+
+
+def tree_shape(struct):
+    return tree.tree_map(jnp.shape, struct)
+
+
 def expand(struct, n, axis=0):
     return tree.tree_map(
         lambda x: jnp.broadcast_to(
@@ -16,10 +24,9 @@ def shuffle_along_axis(rng, a, axis):
     return onp.take_along_axis(a, idx, axis=axis)
 
 
-def split_rng_or_none(rng, n):
+def split_rng_or_none(rng, n=2):
     if rng is None:
-        # return [None] * n
-        return jnp.zeros((n, 1), dtype=jnp.int32)
+        return [None] * n
     else:
         return random.split(rng, n)
 
@@ -28,6 +35,12 @@ def use_self_as_default(*top_args, **are_functions):
     def decorator(func):
         def wrapper(self, *args, **kwargs):
             args = list(args)
+
+            # print(func)
+            # print(len(args))
+            # print(kwargs.keys())
+            # print(kwargs)
+
             for arg in top_args:
                 if isinstance(arg, tuple):
                     k0 = arg[0]
@@ -36,7 +49,11 @@ def use_self_as_default(*top_args, **are_functions):
                     k0 = k1 = arg
 
                 k_index = func.__code__.co_varnames.index(k0)
-                if ((k0 not in kwargs) or (kwargs.get(k0) is None)) and (
+                # print(k0, k_index)
+
+                if kwargs.get(k0) is not None:
+                    continue
+                elif ((k0 not in kwargs) or (kwargs.get(k0) is None)) and (
                     (len(args) < (k_index))
                 ):
                     kwargs[k0] = getattr(self, k1)
