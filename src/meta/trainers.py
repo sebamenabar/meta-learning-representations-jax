@@ -75,7 +75,7 @@ class MetaTrainerB(MetaLearnerBaseB):
         if self.train_lr:
             params = (self.params, self.inner_lr)
         else:
-            params = (self.params,)
+            params = self.params
         if self.cross_replica_axis is not None:
             opt_state = jax.pmap(self.optimizer.init)(params)
         else:
@@ -238,11 +238,11 @@ class MetaTrainerB(MetaLearnerBaseB):
         # )
 
         if include_spt:
-            x_qry = jnp.concatenate((x_spt, x_qry, x_qry_cl))
-            y_qry = jnp.concatenate((y_spt, y_qry, y_qry_cl))
+            x_qry = jnp.concatenate((x_spt, x_qry, x_qry_cl), 1)
+            y_qry = jnp.concatenate((y_spt, y_qry, y_qry_cl), 1)
         else:
-            x_qry = jnp.concatenate((x_qry, x_qry_cl))
-            y_qry = jnp.concatenate((y_qry, y_qry_cl))
+            x_qry = jnp.concatenate((x_qry, x_qry_cl), 1)
+            y_qry = jnp.concatenate((y_qry, y_qry_cl), 1)
 
         def helper(_params, _lr=inner_lr):
             loss, out = self.outer_loss(
@@ -273,7 +273,7 @@ class MetaTrainerB(MetaLearnerBaseB):
             return jnp.mean(loss), out
 
         (loss, out), grads = jax.value_and_grad(
-            helper, has_aux=True, argnums=tuple(range(len(_params)))
+            helper, has_aux=True, argnums=(0, 1) if self.train_lr else 0
         )(*_params)
         if self.cross_replica_axis is not None:
             grads = jax.lax.pmean(grads, self.cross_replica_axis)

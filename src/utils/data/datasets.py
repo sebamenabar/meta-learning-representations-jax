@@ -33,7 +33,7 @@ class SimpleDataset:
 
     def take(self, index):
         # Useful if your data consists of ndarrays
-        return self.inputs.take(index), self.targets.take(index)
+        return self.inputs.take(index, axis=0), self.targets.take(index, axis=0)
 
     @property
     def isarray(self):

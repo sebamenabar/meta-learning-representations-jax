@@ -1,5 +1,11 @@
 import numpy as onp
-from jax import numpy as jnp, random, tree_util as tree
+from jax import numpy as jnp, random, tree_util as tree, pmap, partial
+
+
+def pmap_init(model, static_args, static_kwargs, *args, **kwargs):
+    return pmap(partial(model.init, *static_args, **static_kwargs), axis_name="i")(
+        *args, **kwargs
+    )
 
 
 def mean_of_f(f, mean_f=jnp.mean):

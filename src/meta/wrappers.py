@@ -321,9 +321,10 @@ class ContinualLearnerB(MetaLearnerBaseB):
 
         if fast_params is None:
             fast_params = expand(self.get_fp(params or self.params), bsz)
+
         if fast_state is None:
             fast_state = expand(
-                self.get_fs(merge(state or self.state, slow_state)), bsz
+                self.get_fs(merge(state if state is not None else self.state, slow_state)), bsz
             )
         if opt_state is None:
             opt_state = init_opt_state(fast_params)
@@ -346,7 +347,7 @@ class ContinualLearnerB(MetaLearnerBaseB):
                 y,
                 rng=_rng,
                 params=params,
-                state=merge(state or self.state, slow_state),
+                state=merge(state if state is not None else self.state, slow_state),
                 fast_params=fast_params,
                 fast_state=fast_state,
                 lr=lr,

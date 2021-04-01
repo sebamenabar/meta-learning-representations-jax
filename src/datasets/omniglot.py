@@ -27,5 +27,8 @@ def get_omniglot_dataset(
     data = onp.load(fp)
 
     return ImageDataset(
-        data["images"], data["targets"], data["mean_0_1"], data["std_0_1"]
+        data["images"].transpose(0, 2, 3, 1),
+        data["targets"],
+        data["mean_0_1"],
+        data["std_0_1"],
     )
