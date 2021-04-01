@@ -26,7 +26,7 @@ def tree_shape(struct):
     return tree.tree_map(jnp.shape, struct)
 
 
-def expand(struct, n, axis=0):
+def expand(struct, n=1, axis=0):
     return tree.tree_map(
         lambda x: jnp.broadcast_to(
             jnp.expand_dims(x, axis), x.shape[:axis] + (n,) + x.shape[axis:]
