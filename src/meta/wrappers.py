@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 from jax.random import split
 from haiku.data_structures import merge
-from numpy.testing._private.utils import KnownFailureException
 import optax as ox
 
 from .base import MetaBase
@@ -12,7 +11,6 @@ from utils import (
     first_leaf_shape,
     split_rng_or_none,
 )
-from utils.losses import mean_xe_and_acc_dict
 
 
 def make_simple_opt_update(opt):

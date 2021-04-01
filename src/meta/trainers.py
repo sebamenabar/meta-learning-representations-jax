@@ -3,8 +3,9 @@ from jax import numpy as jnp
 from jax.random import split
 import optax as ox
 from haiku.data_structures import merge
-from utils import tree_shape, use_self_as_default, tree_flatten_array, split_rng_or_none
+from utils import use_self_as_default, tree_flatten_array, split_rng_or_none
 from .wrappers import MetaLearnerBaseB
+
 
 class MetaTrainerB(MetaLearnerBaseB):
     def __init__(
@@ -59,7 +60,7 @@ class MetaTrainerB(MetaLearnerBaseB):
                 fast_state=fast_state,
             )
         )
-        
+
         if self.cross_replica_axis is not None:
             self.update = jax.pmap(update, axis_name="i")
         else:
@@ -208,7 +209,7 @@ class MetaTrainerB(MetaLearnerBaseB):
         inner_opt_update=None,
         fast_state=None,
     ):
-        
+
         rng_data, rng_reset, rng_pre, rng = split(rng, 4)
 
         # inputs come as uint8 for speedier transfer

@@ -4,7 +4,6 @@ from haiku.data_structures import merge
 
 from utils import use_self_as_default, first_leaf_shape
 from utils.losses import mean_xe_and_acc_dict
-from utils.utils import tree_shape
 
 
 class MetaBase:
@@ -121,7 +120,6 @@ class MetaBase:
                 fast_state=_fast_state,
             )
 
-
         kwargs = {}
         if rng is not None:
             if not alt:
@@ -136,10 +134,8 @@ class MetaBase:
             kwargs["_x"] = x
             kwargs["_y"] = y
 
-
         loss, (new_state, loss_aux, outputs) = jax.vmap(f)(**kwargs)
         return loss, (new_state, loss_aux, outputs)
-
 
     @use_self_as_default("params", "state", "training")
     def _slow_apply(self, x, rng=None, params=None, state=None, training=None):
