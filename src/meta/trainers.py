@@ -1,9 +1,17 @@
+import numpy as onp
 import jax
 from jax import numpy as jnp
 from jax.random import split
 import optax as ox
 from haiku.data_structures import merge
-from utils import use_self_as_default, tree_flatten_array, split_rng_or_none
+from utils import (
+    use_self_as_default,
+    tree_flatten_array,
+    split_rng_or_none,
+    first_leaf_shape,
+    expand,
+)
+from utils.utils import tree_shape
 from .wrappers import MetaLearnerBaseB
 
 
@@ -125,8 +133,8 @@ class MetaTrainerB(MetaLearnerBaseB):
         if self.cross_replica_axis is not None:
             rng = split(rng, jax.local_device_count())
             step_num = jax.device_put_replicated(step_num, jax.local_devices())
-            if spt_classes is None:
-                spt_classes = [None] * jax.local_device_count()
+            # if spt_classes is None:
+            #     spt_classes = [None] * jax.local_device_count()
 
         if self.train_lr:
             params = (self.params, self.inner_lr)
@@ -134,9 +142,9 @@ class MetaTrainerB(MetaLearnerBaseB):
             params = self.params
 
         if self.fast_state is not None:
-            args = (self.fast_state,)
+            kwargs = {"fast_state": self.fast_state}
         else:
-            args = tuple()
+            kwargs = {}
 
         loss, params, opt_state, out = self.update(
             rng,
@@ -147,11 +155,11 @@ class MetaTrainerB(MetaLearnerBaseB):
             y_qry,
             x_qry_cl,
             y_qry_cl,
-            spt_classes,
+            onp.unique(y_spt, axis=-1),
             params,
             self.state,
             self.opt_state,
-            *args,
+            **kwargs,
         )
         if self.train_lr:
             self.params = params[0]
@@ -226,8 +234,26 @@ class MetaTrainerB(MetaLearnerBaseB):
             # opt_state = self.init_opt_state(params)
             opt_state = optimizer.init(params)
 
-        if reset_before_outer_loop and reset_fast_params:
-            params = (reset_fast_params(rng_reset, params[0], spt_classes), *params[1:])
+        if (
+            reset_before_outer_loop
+            and (reset_fast_params is not None)
+            and (spt_classes is not None)
+        ):
+            # TODO: move this before step
+            print("Resetting params before outer loop")
+            # params = (reset_fast_params(rng_reset, params[0], spt_classes), *params[1:])
+            _params = (
+                reset_fast_params(rng_reset, _params[0], spt_classes.reshape(-1)),
+                *_params[1:],
+            )
+            # _params = (
+            #     jax.vmap(jax.partial(reset_fast_params))(
+            #         split(rng_reset, first_leaf_shape(_params)[0]),
+            #         _params,
+            #         spt_classes,
+            #     ),
+            #     *_params[1:],
+            # )
 
         # _, pre_slow_state = self.slow_apply(
         #     x_qry_cl,
@@ -324,8 +350,29 @@ class MetaTrainerB(MetaLearnerBaseB):
         if (lr is not None) and (not self.train_lr):
             lr = jax.lax.stop_gradient(lr)
 
-        if (spt_classes is not None) and reset_before_outer_loop and reset_fast_params:
-            params = reset_fast_params(rng_reset, params, spt_classes)
+        if fast_params is None:
+            fast_params = expand(
+                self.get_fp(params or self.params), first_leaf_shape(x_spt)[0]
+            )
+
+        print(tree_shape(fast_params))
+
+        print(spt_classes)
+        print(reset_before_outer_loop)
+        print(reset_fast_params)
+
+        if (
+            (spt_classes is not None)
+            and (not reset_before_outer_loop)
+            and (reset_fast_params is not None)
+        ):
+            # params = reset_fast_params(rng_reset, params, spt_classes)
+            print("Resetting params in outer loop")
+            fast_params = jax.vmap(jax.partial(reset_fast_params))(
+                split(rng_reset, first_leaf_shape(fast_params)[0]),
+                fast_params,
+                spt_classes,
+            )
 
         slow_outputs, slow_state = self.learner.slow_apply(
             x_qry,
@@ -343,6 +390,10 @@ class MetaTrainerB(MetaLearnerBaseB):
             state=slow_state,
             training=training,
             loss_fn=loss_fn,
+            fast_params=fast_params,
+            # spt_classes=spt_classes,
+            # reset_fast_params=reset_fast_params,
+            # reset_before_outer_loop=reset_before_outer_loop,
             # alt=alt,
         )
         initial_outer_out = dict(
