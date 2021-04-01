@@ -2,6 +2,22 @@ import numpy as onp
 from jax import numpy as jnp, random, tree_util as tree
 
 
+def mean_of_f(f, mean_f=jnp.mean):
+    def _f(*args, **kwargs):
+        out = f(*args, **kwargs)
+        if type(out) is tuple:
+            return jnp.mean(out[0]), out[1:]
+        return mean_f(out)
+
+    return _f
+
+
+def tree_flatten_array(struct, n=2):
+    return tree.tree_map(
+        lambda t: t.reshape(onp.prod(t.shape[:n]), *t.shape[n:]), struct
+    )
+
+
 def first_leaf_shape(struct):
     return tree.tree_flatten(struct)[0][0].shape
 

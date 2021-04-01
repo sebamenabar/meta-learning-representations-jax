@@ -9,6 +9,10 @@ def filter_structure_by_str(instr, structure):
 
 
 class SimpleModel(hk.Module):
+    def __init__(self, cross_replica_axis=None, name=None):
+        super().__init__(name=name)
+        self.cross_replica_axis = cross_replica_axis
+
     train_slow_phase = "train_slow_phase"
     train_fast_phase = "train_fast_phase"
     test_slow_phase = "test_slow_phase"
@@ -29,7 +33,9 @@ class SimpleModel(hk.Module):
             with hk.experimental.name_scope("slow1"):
                 x = inputs
                 x = hk.Linear(8)(x)
-                x = hk.BatchNorm(True, True, 0.99)(x, training)
+                x = hk.BatchNorm(
+                    True, True, 0.99, cross_replica_axis=self.cross_replica_axis
+                )(x, training)
                 out = (x,)
         else:
             (x,) = inputs
@@ -38,15 +44,21 @@ class SimpleModel(hk.Module):
 
             with hk.experimental.name_scope("fast"):
                 x = hk.Linear(8)(x)
-                x = hk.BatchNorm(True, True, 0.99)(x, training)
+                x = hk.BatchNorm(
+                    True, True, 0.99, cross_replica_axis=self.cross_replica_axis
+                )(x, training)
 
             with hk.experimental.name_scope("slow2"):
                 x = hk.Linear(8)(x)
-                x = hk.BatchNorm(True, True, 0.99)(x, training)
+                x = hk.BatchNorm(
+                    True, True, 0.99, cross_replica_axis=self.cross_replica_axis
+                )(x, training)
 
             with hk.experimental.name_scope("fast"):
                 x = hk.Linear(4)(x)
-                x = hk.BatchNorm(True, True, 0.99)(x, training)
+                x = hk.BatchNorm(
+                    True, True, 0.99, cross_replica_axis=self.cross_replica_axis
+                )(x, training)
                 x = hk.Linear(2, w_init=hk.initializers.Constant(0))(x)
 
             out = x

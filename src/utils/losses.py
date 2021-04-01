@@ -21,5 +21,5 @@ def mean_xe_and_acc(logits, targets):
 
 
 def mean_xe_and_acc_dict(logits, targets):
-    loss, acc = mean_xe_and_acc(logits, targets)
-    return loss, {"acc": acc}
+    loss, acc = xe_and_acc(logits, targets)
+    return loss.mean(), {"acc": acc, "loss": loss}

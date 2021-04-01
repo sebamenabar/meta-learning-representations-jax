@@ -117,29 +117,31 @@ class MetaLearnerBase(MetaBase):
     #     loss, loss_aux = loss_fn(outputs, y)
     #     return loss, (new_state, loss_aux, outputs)
 
-    def __single_fast_step(
+    @use_self_as_default("params", "lr", "init_opt_state", "opt_update")
+    def _single_fast_step(
         self,
         x,
         y,
-        rng,
-        params,
-        state,
-        fast_params,
-        fast_state,
-        lr,
-        training,
-        loss_fn,
-        init_opt_state,
-        opt_update,
-        opt_state,
+        rng=None,
+        params=None,
+        state=None,
+        fast_params=None,
+        fast_state=None,
+        lr=None,
+        training=None,
+        loss_fn=None,
+        init_opt_state=None,
+        opt_update=None,
+        opt_state=None,
     ):
         if fast_params is None:
             fast_params = self.get_fp(params)
+            # fast_params = expand(self.get_fp(params), first_leaf_shape(x)[0])
         if opt_state is None:
             opt_state = init_opt_state(fast_params)
 
         (loss, (new_state, loss_aux, outputs)), grads = jax.value_and_grad(
-            lambda _fast_params: self.fast_apply_and_loss(
+            lambda _fast_params: self._fast_apply_and_loss(
                 x,
                 y,
                 params=params,
@@ -187,7 +189,7 @@ class MetaLearnerBase(MetaBase):
             kwargs["fast_state"] = fast_state
 
         def fast_apply_and_loss_helper(x, y, kwargs={}):
-            return self.__single_fast_step(
+            return self._single_fast_step(
                 x,
                 y,
                 rng=kwargs.get("rng", None),
