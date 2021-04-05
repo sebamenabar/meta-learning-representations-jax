@@ -311,6 +311,8 @@ class ContinualLearnerB(MetaLearnerBaseB):
         spt_classes=None,
         reset_fast_params=None,
         reset_before_outer_loop=None,
+        with_initial=False,
+        with_final=False,
     ):
         bsz, traj_length = first_leaf_shape(x_spt)[:2]
         rng_reset, rng_slow, rng_fast = split_rng_or_none(rng, 3)
@@ -325,7 +327,11 @@ class ContinualLearnerB(MetaLearnerBaseB):
         if fast_params is None:
             fast_params = expand(self.get_fp(params or self.params), bsz)
 
-        if (spt_classes is not None) and (reset_fast_params is not None) and (not reset_before_outer_loop):
+        if (
+            (spt_classes is not None)
+            and (reset_fast_params is not None)
+            and (not reset_before_outer_loop)
+        ):
             fast_params = reset_fast_params(rng_reset, fast_params, spt_classes)
             fast_params = jax.vmap(jax.partial(reset_fast_params))(
                 split(rng_reset, first_leaf_shape(fast_params)[0]),
@@ -335,8 +341,27 @@ class ContinualLearnerB(MetaLearnerBaseB):
 
         if fast_state is None:
             fast_state = expand(
-                self.get_fs(merge(state if state is not None else self.state, slow_state)), bsz
+                self.get_fs(
+                    merge(state if state is not None else self.state, slow_state)
+                ),
+                bsz,
             )
+
+        if with_initial:
+            initial_out = self.fast_apply_and_loss(
+                slow_outputs,
+                y_spt,
+                rng_fast,
+                params,
+                state,
+                training,
+                fast_params,
+                fast_state,
+                loss_fn,
+            )
+        else:
+            initial_out = None
+
         if opt_state is None:
             opt_state = init_opt_state(fast_params)
 
@@ -392,6 +417,22 @@ class ContinualLearnerB(MetaLearnerBaseB):
         (loss, loss_aux, outputs) = aux
         outputs = jnp.squeeze(outputs, 2)
 
+        if with_final:
+            final_out = self.fast_apply_and_loss(
+                slow_outputs,
+                y_spt,
+                rng_fast,
+                params,
+                state,
+                training,
+                fast_params,
+                fast_state,
+                loss_fn,
+            )
+        else:
+            final_out = None
+
+
         return dict(
             fast_params=fast_params,
             slow_state=slow_state,
@@ -401,4 +442,6 @@ class ContinualLearnerB(MetaLearnerBaseB):
             loss_aux=loss_aux,
             slow_outputs=slow_outputs,
             outputs=outputs,
+            initial_out=initial_out,
+            final_out=final_out,
         )

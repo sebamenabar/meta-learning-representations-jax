@@ -4,8 +4,10 @@ from utils.data import ImageDataset
 OMNIGLOT_FILES = {
     "train": "val_train_train",
     "train+val": "train",
+    "val": "val_test_train",
     "val_train": "val_test_train",
     "val_test": "val_test_test",
+    "test": "test_train",
     "test_train": "test_train",
     "test_test": "test_test",
 }

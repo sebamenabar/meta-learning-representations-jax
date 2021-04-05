@@ -10,6 +10,7 @@ from utils import (
     split_rng_or_none,
     first_leaf_shape,
     expand,
+    get_sharded_array_first,
 )
 from utils.utils import tree_shape
 from .wrappers import MetaLearnerBaseB
@@ -22,6 +23,7 @@ class MetaTrainerB(MetaLearnerBaseB):
         *args,
         opt_state=None,
         inner_lr=None,
+        preprocess_fn=None,
         augmentation="none",
         augmentation_fn=None,
         alt=True,
@@ -50,6 +52,7 @@ class MetaTrainerB(MetaLearnerBaseB):
         self.scheduler = scheduler
         self.optimizer = optimizer
         self.fast_state = None
+        self.preprocess_fn = preprocess_fn
 
         update = jax.partial(
             lambda rng, step_num, x_spt, y_spt, x_qry, y_qry, x_qry_cl, y_qry_cl, spt_classes, params, state, opt_state, fast_state=None: self._update(
@@ -78,6 +81,17 @@ class MetaTrainerB(MetaLearnerBaseB):
         #     self.params = (self.params, self.inner_lr)
         # else:
         #     self.params = self.params,
+
+    @property
+    def status(self):
+        return self.params, self.state, self.fast_state, self.opt_state, self.lr
+
+    def get_status_first(self):
+        if self.cross_replica_axis is None:
+            return self.status
+        return jax.tree_map(
+            lambda x: get_sharded_array_first(x) if x is not None else x, self.status
+        )
 
     def initialize_opt_state(self):
         if self.train_lr:
@@ -146,7 +160,7 @@ class MetaTrainerB(MetaLearnerBaseB):
         else:
             kwargs = {}
 
-        loss, params, opt_state, out = self.update(
+        loss, params, opt_state, slow_state, fast_state, out = self.update(
             rng,
             step_num,
             x_spt,
@@ -167,10 +181,10 @@ class MetaTrainerB(MetaLearnerBaseB):
         else:
             self.params = params
         self.state = merge(
-            out["initial_outer_out"]["slow_state"],
+            slow_state,
             # out["inner_out"]["fast_state"],
         )
-        self.fast_state = out["inner_out"]["fast_state"]
+        self.fast_state = fast_state
         self.opt_state = opt_state
 
         return loss, out, self.inner_lr
@@ -224,6 +238,10 @@ class MetaTrainerB(MetaLearnerBaseB):
         x_spt, x_qry, x_qry_cl = self.augments(
             rng_data, x_spt / 255, x_qry / 255, x_qry_cl / 255
         )
+        if self.preprocess_fn:
+            x_spt, x_qry, x_qry_cl = jax.tree_map(
+                self.preprocess_fn, (x_spt, x_qry, x_qry_cl)
+            )
 
         if self.train_lr:
             _params = params
@@ -309,7 +327,24 @@ class MetaTrainerB(MetaLearnerBaseB):
             updates = self.scheduler(updates)
         params = ox.apply_updates(params, updates)
 
-        return loss, params, opt_state, out
+        return (
+            loss,
+            params,
+            opt_state,
+            out["initial_outer_out"]["slow_state"],
+            out["inner_out"]["fast_state"],
+            {
+
+                "foa": out["outer_out"]["loss_aux"]["acc"],
+                "iol": out["initial_outer_out"]["loss"],
+                "ioa": out["initial_outer_out"]["loss_aux"]["acc"],
+                "iia": out["inner_out"]["initial_out"][1][1]["acc"],
+                "iil": out["inner_out"]["initial_out"][1][1]["loss"],
+                "fia": out["inner_out"]["final_out"][1][1]["acc"],
+                "fil": out["inner_out"]["final_out"][1][1]["loss"],
+                "inner_progress": out["inner_out"]["loss_aux"],
+            },
+        )
 
     @use_self_as_default(
         "alt",
@@ -345,7 +380,13 @@ class MetaTrainerB(MetaLearnerBaseB):
         fast_params=None,
         fast_state=None,
     ):
-        rng_inner, rng_outer_slow, rng_outer_fast, rng_reset = split_rng_or_none(rng, 4)
+        (
+            rng_inner_pre,
+            rng_inner,
+            rng_outer_slow,
+            rng_outer_fast,
+            rng_reset,
+        ) = split_rng_or_none(rng, 5)
 
         if (lr is not None) and (not self.train_lr):
             lr = jax.lax.stop_gradient(lr)
@@ -354,12 +395,6 @@ class MetaTrainerB(MetaLearnerBaseB):
             fast_params = expand(
                 self.get_fp(params or self.params), first_leaf_shape(x_spt)[0]
             )
-
-        print(tree_shape(fast_params))
-
-        print(spt_classes)
-        print(reset_before_outer_loop)
-        print(reset_fast_params)
 
         if (
             (spt_classes is not None)
@@ -403,6 +438,27 @@ class MetaTrainerB(MetaLearnerBaseB):
             loss_aux=loss_aux,
             outputs=outputs,
         )
+        # loss, (_, loss_aux, _) = self.learner.apply_and_loss(
+        #     x_spt,
+        #     y_spt,
+        #     rng=rng_inner_pre,
+        #     params=params,
+        #     state=slow_state,
+        #     training=training,
+        #     loss_fn=loss_fn,
+        #     fast_params=fast_params,
+        #     # spt_classes=spt_classes,
+        #     # reset_fast_params=reset_fast_params,
+        #     # reset_before_outer_loop=reset_before_outer_loop,
+        #     # alt=alt,
+        # )
+        # initial_inner_out = dict(
+        #     loss=loss,
+        #     # slow_state=slow_state,
+        #     # fast_state=new_state,
+        #     loss_aux=loss_aux,
+        #     # outputs=outputs,
+        # )
 
         inner_out = self.learner.inner_loop(
             x_spt,
@@ -418,6 +474,8 @@ class MetaTrainerB(MetaLearnerBaseB):
             opt_update=opt_update,
             fast_params=fast_params,
             fast_state=fast_state,
+            with_initial=True,
+            with_final=True,
         )
 
         if alt:
@@ -443,4 +501,5 @@ class MetaTrainerB(MetaLearnerBaseB):
             inner_out=inner_out,
             outer_out=outer_out,
             initial_outer_out=initial_outer_out,
+            # initial_inner_out=initial_inner_out,
         )

@@ -1,5 +1,37 @@
 import numpy as onp
+import jax
 from jax import numpy as jnp, random, tree_util as tree, pmap, partial
+
+
+def _resize_batch_dim(array, num_devices=jax.local_device_count()):
+    bsz = array.shape[0]
+    assert (
+        bsz % num_devices
+    ) == 0, f"Batch size must be divisible but number of available devices, received batch size: {bsz} and num devices: {num_devices}"
+    return array.reshape(num_devices, bsz // num_devices, *array.shape[1:])
+
+
+def resize_batch_dim(struct, num_devices=jax.local_device_count()):
+    return jax.tree_map(_resize_batch_dim, struct)
+
+
+def flatten_dims(struct, dims=(1, 3)):
+    return jax.tree_map(
+        lambda t: t.reshape(
+            *t.shape[: dims[0]],
+            onp.prod(t.shape[dims[0] : dims[1]]),
+            *t.shape[dims[1] :],
+        ),
+        struct,
+    )
+
+
+def is_sorted(a):
+    return onp.all(a[:-1] <= a[1:])
+
+
+def get_sharded_array_first(struct):
+    return tree.tree_map(lambda x: x[0], struct)
 
 
 def pmap_init(model, static_args, static_kwargs, *args, **kwargs):

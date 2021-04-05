@@ -5,6 +5,9 @@ from .utils import kaiming_normal
 
 
 class OMLConvnet(hk.Module):
+    outer_slow_train_phase = inner_slow_train_phase = slow_test_phase = "encoder"
+    outer_fast_train_phase = inner_fast_train_phase = fast_test_phase = "adaptation"
+
     def __init__(
         self,
         # output_size,
@@ -24,6 +27,12 @@ class OMLConvnet(hk.Module):
         elif image_size == 28:
             self.strides = (1, 1, 2, 1, 1, 2)
 
+        self.get_slow_params_train = self.get_slow_params_test = self.get_slow_params
+        self.get_fast_params_train = self.get_fast_params_test = self.get_fast_params
+
+        self.get_slow_state_train = self.get_slow_state_test = self.get_state
+        self.get_fast_state_train = self.get_fast_state_test = self.get_state
+
     @staticmethod
     def split_body_cls_params(params):
         return hk.data_structures.partition(
@@ -32,20 +41,55 @@ class OMLConvnet(hk.Module):
         )
 
     @staticmethod
-    def get_train_slow_params(params):
+    def get_classifier_params(params):
+        return OMLConvnet.get_fast_params(params)
+
+    @staticmethod
+    def get_classifier_w(params):
+        return hk.data_structures.filter(
+            lambda module_name, name, value: ("CLS" in module_name) and (name == "w"),
+            params,
+        )
+
+    @staticmethod
+    def get_slow_params(params):
         return OMLConvnet.split_body_cls_params(params)[0]
 
     @staticmethod
-    def get_train_fast_params(params):
+    def get_fast_params(params):
         return OMLConvnet.split_body_cls_params(params)[1]
 
     @staticmethod
+    def get_train_slow_params(params):
+        return OMLConvnet.get_slow_params(params)
+
+    @staticmethod
+    def get_train_fast_params(params):
+        return OMLConvnet.get_fast_params(params)
+
+    @staticmethod
     def get_test_slow_params(params):
-        return OMLConvnet.get_train_slow_params(params)
+        return OMLConvnet.get_slow_params(params)
 
     @staticmethod
     def get_test_fast_params(params):
-        return OMLConvnet.get_train_fast_params(params)
+        return OMLConvnet.get_fast_params(params)
+
+    @staticmethod
+    def get_train_slow_state(state):
+        return OMLConvnet.get_state(state)
+
+    @staticmethod
+    def get_train_fast_state(state):
+        return OMLConvnet.get_state(state)
+
+    @staticmethod
+    def get_test_slow_state(state):
+        return OMLConvnet.get_state(state)
+
+    @staticmethod
+    def get_test_fast_state(state):
+        return OMLConvnet.get_state(state)
 
     @staticmethod
     def get_state(state):
